@@ -1,0 +1,5 @@
+{
+  "name": "msds-section-extractor",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-12-24"
+}

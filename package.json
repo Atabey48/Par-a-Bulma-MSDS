@@ -1,0 +1,9 @@
+{
+  "name": "msds-section-extractor-worker",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "pdfjs-serverless": "^1.1.0"
+  }
+}
