@@ -11,12 +11,8 @@ export default {
     }
 
     if (url.pathname === "/api/extract") {
-      // Preflight support (optional)
       if (request.method === "OPTIONS") {
-        return new Response(null, {
-          status: 204,
-          headers: corsHeaders(),
-        });
+        return new Response(null, { status: 204, headers: corsHeaders() });
       }
       return withCors(handleExtract(request, env));
     }
@@ -26,7 +22,7 @@ export default {
 };
 
 /* -----------------------------
-   UI (Single Page)
+   UI
 -------------------------------- */
 const UI_HTML = `<!DOCTYPE html>
 <html lang="tr">
@@ -139,7 +135,7 @@ const UI_HTML = `<!DOCTYPE html>
     <div class="topbar__inner">
       <div class="brand">
         <h1>MSDS Section Extractor</h1>
-        <p>Parça numarası yaz → PDF MSDS bul → Section 7 & Section 14 göster</p>
+        <p>Parça no yaz → PDF bul → Handling & Storage + Transport Information çıkar</p>
       </div>
       <div class="by">by Furkan ATABEY</div>
     </div>
@@ -154,7 +150,7 @@ const UI_HTML = `<!DOCTYPE html>
           <button id="btn">Ara</button>
         </div>
         <p class="hint">
-          Bu sürümde arama ve PDF işleme sunucu tarafında yapılır (Cloudflare Worker). Böylece CORS hatası olmaz.
+          Arama ve PDF işleme sunucuda yapılır. “Invalid PDF structure” genelde seçilen linkin PDF değil HTML viewer dönmesidir; bu sürüm bunu daha net ayıklar.
         </p>
         <div id="st" class="status"></div>
         <div id="res" class="results"></div>
@@ -162,7 +158,7 @@ const UI_HTML = `<!DOCTYPE html>
 
       <section class="card">
         <div class="sectionTitle">
-          <h3>Section 7: Handling and Storage</h3>
+          <h3>Handling and storage (Section 7)</h3>
           <button class="ghost" id="c7">Kopyala</button>
         </div>
         <div class="subinfo" id="info">Seçili PDF yok.</div>
@@ -171,7 +167,7 @@ const UI_HTML = `<!DOCTYPE html>
         <div style="height:14px"></div>
 
         <div class="sectionTitle">
-          <h3>Section 14: Transport Information</h3>
+          <h3>Transport information (Section 14)</h3>
           <button class="ghost" id="c14">Kopyala</button>
         </div>
         <div class="subinfo" id="meta"></div>
@@ -201,7 +197,7 @@ const UI_HTML = `<!DOCTYPE html>
       const data = await r.json();
       if(!r.ok) throw new Error(data.error || "Arama başarısız.");
       render(data.items||[]);
-      setStatus((data.items||[]).length + " PDF bulundu. Birini seçip ayıklayın.","ok");
+      setStatus((data.items||[]).length + " sonuç bulundu. Üsttekiler direct PDF link olmaya daha yakındır.","ok");
     }catch(e){
       setStatus(e.message||"Hata","err");
     }finally{
@@ -222,7 +218,7 @@ const UI_HTML = `<!DOCTYPE html>
       const left=document.createElement("div");
       left.innerHTML = '<h3></h3><div class="meta"><span class="pill"></span><span class="sn"></span></div>';
       left.querySelector("h3").textContent = it.title || "Adsız PDF";
-      left.querySelector(".pill").textContent = it.host || "";
+      left.querySelector(".pill").textContent = (it.host || "") + (it.directPdf ? " • direct" : " • viewer");
       left.querySelector(".sn").textContent = it.snippet || "";
 
       const act=document.createElement("div");
@@ -279,7 +275,7 @@ const UI_HTML = `<!DOCTYPE html>
 </html>`;
 
 /* -----------------------------
-   API: /api/search
+   /api/search
 -------------------------------- */
 async function handleSearch(request, env) {
   try {
@@ -291,8 +287,7 @@ async function handleSearch(request, env) {
       return json({ error: "Worker secrets eksik: GOOGLE_API_KEY / GOOGLE_CX." }, 500);
     }
 
-    // PDF odaklı sorgu
-    const query = `${q} (MSDS OR SDS OR Safety Data Sheet) filetype:pdf`;
+    const query = `${q} (MSDS OR SDS OR "Safety Data Sheet") filetype:pdf`;
 
     const apiUrl =
       "https://www.googleapis.com/customsearch/v1" +
@@ -308,49 +303,80 @@ async function handleSearch(request, env) {
       return json({ error: data?.error?.message || `Google API hata: ${resp.status}` }, 502);
     }
 
-    const items = (data.items || [])
+    const raw = (data.items || [])
       .filter((it) => it.link)
-      .map((it) => ({
-        title: it.title || "",
-        link: it.link,
-        snippet: it.snippet || "",
-        host: it.displayLink || safeHost(it.link),
-        mime: it.mime || "",
-      }))
-      // Bazı sonuçlar "viewer" olabilir; yine de gösteriyoruz ama extract tarafında PDF doğrulanacak
-      .slice(0, 10);
+      .map((it) => {
+        const link = it.link;
+        const directPdf = isLikelyDirectPdfLink(link, it.mime);
+        return ({
+          title: it.title || "",
+          link,
+          snippet: it.snippet || "",
+          host: it.displayLink || safeHost(link),
+          mime: it.mime || "",
+          directPdf
+        });
+      });
 
-    return json({ items });
+    // Direct PDF linkleri üste çıkar (Invalid PDF structure oranını düşürür)
+    raw.sort((a, b) => Number(b.directPdf) - Number(a.directPdf));
+
+    return json({ items: raw.slice(0, 10) });
   } catch (e) {
     return json({ error: e?.message || "Search error" }, 500);
   }
 }
 
+function isLikelyDirectPdfLink(link, mime) {
+  const l = String(link || "").toLowerCase();
+  const m = String(mime || "").toLowerCase();
+  if (m.includes("pdf")) return true;
+  if (l.endsWith(".pdf")) return true;
+  if (l.includes(".pdf?")) return true;
+  // google drive view linkleri direct değildir
+  if (l.includes("drive.google.com") && l.includes("/view")) return false;
+  return false;
+}
+
 /* -----------------------------
-   API: /api/extract
+   /api/extract
 -------------------------------- */
 const CACHE_TTL_MS = 15 * 60 * 1000;
-const MAX_PDF_BYTES = 20 * 1024 * 1024;
-const FETCH_TIMEOUT_MS = 15000;
+const MAX_PDF_BYTES = 22 * 1024 * 1024;
+const FETCH_TIMEOUT_MS = 25000;
 
-const extractCache = new Map(); // url -> { expiresAt, value }
+const extractCache = new Map();
 
 async function handleExtract(request, env) {
   try {
     if (request.method !== "POST") return json({ error: "POST gerekli." }, 405);
 
     const body = await request.json().catch(() => null);
-    const pdfUrl = String(body?.pdfUrl || "").trim();
-    if (!pdfUrl) return json({ error: "pdfUrl gerekli." }, 400);
+    const pdfUrl0 = String(body?.pdfUrl || "").trim();
+    if (!pdfUrl0) return json({ error: "pdfUrl gerekli." }, 400);
 
-    // Cache
-    const cached = cacheGet(extractCache, pdfUrl);
+    const cached = cacheGet(extractCache, pdfUrl0);
     if (cached) return json(cached);
 
-    const safe = await assertSafeUrl(pdfUrl);
-    const pdfU8 = await fetchPdfAsUint8(safe);
+    const safe0 = await assertSafeUrl(pdfUrl0);
+    const resolved = resolvePdfUrl(safe0);
 
-    const doc = await getDocument({ data: pdfU8, useSystemFonts: true }).promise;
+    const pdfU8 = await fetchPdfAsUint8(resolved);
+
+    let doc;
+    try {
+      doc = await getDocument({ data: pdfU8, useSystemFonts: true }).promise;
+    } catch (e) {
+      // pdfjs'nin "Invalid PDF structure" hatasını kullanıcıya daha anlaşılır ver
+      const msg = String(e?.message || e);
+      if (msg.toLowerCase().includes("invalid pdf structure")) {
+        throw new Error(
+          "Invalid PDF structure: Seçilen link gerçek PDF olmayabilir (viewer/HTML sayfası döndürüyor olabilir) veya PDF bozuk olabilir. " +
+          "Arama listesindeki 'direct' etiketli PDF’leri tercih edin."
+        );
+      }
+      throw e;
+    }
 
     let text = "";
     for (let i = 1; i <= doc.numPages; i++) {
@@ -362,20 +388,43 @@ async function handleExtract(request, env) {
     const { section7, section14 } = parseSections(text);
     const out = { section7, section14, pages: doc.numPages };
 
-    cacheSet(extractCache, pdfUrl, out);
+    cacheSet(extractCache, pdfUrl0, out);
     return json(out);
   } catch (e) {
     const msg =
       e?.name === "AbortError"
         ? "Zaman aşımı: PDF indirilemedi."
         : (e?.message || "Extract error");
-
     return json({ error: msg }, 500);
   }
 }
 
 /* -----------------------------
-   Fetch PDF (robust) + validate
+   URL resolve (Google Drive view => direct download)
+-------------------------------- */
+function resolvePdfUrl(url) {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+
+    // Google Drive: /file/d/<id>/view => uc?export=download&id=<id>
+    if (host.includes("drive.google.com")) {
+      const m = u.pathname.match(/\/file\/d\/([^/]+)\//);
+      if (m && m[1]) {
+        return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(m[1])}`;
+      }
+    }
+
+    return url;
+  } catch {
+    return url;
+  }
+}
+
+/* -----------------------------
+   Fetch PDF + stronger validation
+   - Must start with %PDF- (after optional BOM/whitespace)
+   - Must contain %%EOF near end (to avoid HTML/viewer content)
 -------------------------------- */
 async function fetchPdfAsUint8(url) {
   const ctrl = new AbortController();
@@ -386,8 +435,7 @@ async function fetchPdfAsUint8(url) {
       signal: ctrl.signal,
       redirect: "follow",
       headers: {
-        // Bazı sunucular UA/Accept ile PDF döndürüyor
-        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/1.0)",
+        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/1.2)",
         "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
       },
@@ -404,24 +452,48 @@ async function fetchPdfAsUint8(url) {
 
     const u8 = new Uint8Array(ab);
 
-    // PDF "magic header" doğrulaması: ilk ~2KB içinde %PDF- arıyoruz
-    const head = new TextDecoder("latin1").decode(u8.slice(0, Math.min(u8.length, 2048)));
-    const looksLikePdf = head.includes("%PDF-");
-
-    if (!looksLikePdf) {
-      const snippet = head.replace(/\s+/g, " ").slice(0, 240);
+    // Validate header must be at the beginning (allow BOM/whitespace)
+    if (!startsWithPdfHeader(u8)) {
+      const headTxt = new TextDecoder("latin1").decode(u8.slice(0, Math.min(u8.length, 512)));
+      const snippet = headTxt.replace(/\s+/g, " ").slice(0, 220);
       throw new Error(
-        `Bu URL gerçek PDF döndürmüyor. Content-Type="${ct || "unknown"}". ` +
-        `İlk içerik: "${snippet}". ` +
-        `Genelde "PDF viewer / erişim sayfası / redirect" olur. Başka bir PDF sonucunu deneyin.`
+        `Bu link PDF döndürmüyor (başlık %PDF- ile başlamıyor). Content-Type="${ct || "unknown"}". İlk içerik: "${snippet}".`
       );
     }
 
-    // Content-Type bazen yanlış olabilir; ama magic header varsa devam ediyoruz.
+    // Validate EOF marker (reduce false-positives for HTML viewer pages)
+    if (!hasPdfEof(u8)) {
+      // bazı PDF’ler yine çalışır ama “invalid structure” riskini ciddi azaltır
+      throw new Error(
+        "PDF doğrulama başarısız: %%EOF bulunamadı. Bu link büyük ihtimalle PDF viewer/HTML döndürüyor veya içerik bozuk."
+      );
+    }
+
     return u8;
   } finally {
     clearTimeout(t);
   }
+}
+
+function startsWithPdfHeader(u8) {
+  // skip UTF-8 BOM and whitespace
+  let i = 0;
+  if (u8.length >= 3 && u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) i = 3;
+  while (i < u8.length && (u8[i] === 0x20 || u8[i] === 0x0a || u8[i] === 0x0d || u8[i] === 0x09)) i++;
+
+  const sig = [0x25, 0x50, 0x44, 0x46, 0x2d]; // %PDF-
+  for (let k = 0; k < sig.length; k++) {
+    if (i + k >= u8.length) return false;
+    if (u8[i + k] !== sig[k]) return false;
+  }
+  return true;
+}
+
+function hasPdfEof(u8) {
+  // search "%%EOF" near end (last 16KB)
+  const tailStart = Math.max(0, u8.length - 16384);
+  const tail = new TextDecoder("latin1").decode(u8.slice(tailStart));
+  return tail.includes("%%EOF");
 }
 
 /* -----------------------------
@@ -435,88 +507,99 @@ async function assertSafeUrl(raw) {
   const host = u.hostname.toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost")) throw new Error("Güvenlik: localhost engellendi.");
 
-  // IP yazıldıysa private bloklarını engelle
-  if (/^\\d{1,3}(\\.\\d{1,3}){3}$/.test(host)) {
-    const parts = host.split(".").map((n) => parseInt(n, 10));
-    const [a, b] = parts;
-    if (a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254)) {
-      throw new Error("Güvenlik: private IP engellendi.");
-    }
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+    const [a, b] = host.split(".").map((n) => parseInt(n, 10));
+    const isPrivate =
+      a === 127 ||
+      a === 10 ||
+      (a === 192 && b === 168) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 169 && b === 254);
+    if (isPrivate) throw new Error("Güvenlik: private IP engellendi.");
   }
 
   return u.toString();
 }
 
 /* -----------------------------
-   Section extraction
+   Section extraction (stronger)
+   Goal:
+   - Handling and storage (7)
+   - Transport information (14)
 -------------------------------- */
 function normalizeText(text) {
   let t = String(text || "");
-
-  // line endings
   t = t.replace(/\r\n?/g, "\n");
 
-  // "S E C T I O N" gibi ayrılmış yazımları toparla
+  // spaced words normalization
   t = t.replace(/S\s*E\s*C\s*T\s*I\s*O\s*N/gi, "SECTION");
   t = t.replace(/T\s*R\s*A\s*N\s*S\s*P\s*O\s*R\s*T/gi, "TRANSPORT");
+  t = t.replace(/S\s*H\s*I\s*P\s*P\s*I\s*N\s*G/gi, "SHIPPING");
   t = t.replace(/H\s*A\s*N\s*D\s*L\s*I\s*N\s*G/gi, "HANDLING");
   t = t.replace(/S\s*T\s*O\s*R\s*A\s*G\s*E/gi, "STORAGE");
 
-  // Başlıkları satır başına çek (PDF bazen her şeyi tek satır yapar)
+  // Bring "SECTION14" like forms to line start
+  t = t.replace(/(\s+)(SECTION)(\d{1,2})/gi, "\n$2 $3");
+
+  // Pull headings to start of line
   t = t.replace(/(\s+)(SECTION|Section|BÖLÜM|BOLUM|CHAPTER)\s+/g, "\n$2 ");
-  // "7.", "14)", "14 -" gibi numaralı başlıkları satır başına çek
   t = t.replace(/(\s+)(\d{1,2}\s*[:.)-]\s+)/g, "\n$2");
 
-  // Fazla boşlukları toparla (satırları koru)
   t = t.replace(/[ \t]+/g, " ");
   t = t.replace(/\n{3,}/g, "\n\n");
-
   return t.trim();
+}
+
+function cleanSection(section) {
+  const lines = section.split("\n").map((l) => l.trim());
+  const counts = new Map();
+  for (const l of lines) {
+    if (!l) continue;
+    counts.set(l, (counts.get(l) || 0) + 1);
+  }
+  const filtered = lines.filter((l) => {
+    if (!l) return false;
+    const c = counts.get(l) || 0;
+    if (c >= 3 && l.length < 120) return false;
+    return true;
+  });
+  return filtered.join("\n").trim();
 }
 
 function parseSections(rawText) {
   const text = normalizeText(rawText);
   const upper = text.toUpperCase();
 
-  // Yardımcı: metindeki section başlıklarını indeksle
-  // Örn: "SECTION 7: HANDLING AND STORAGE" / "7. Handling and storage" / "BÖLÜM 14: TAŞIMACILIK BİLGİLERİ"
+  // Index numeric headings
   const headingRegex =
-    /(^|\n)\s*(?:SECTION|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]\s*([^\n]{0,160})/gmi;
+    /(^|\n)\s*(?:SECTION|Section|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]\s*([^\n]{0,180})/gmi;
 
   const headings = [];
   let m;
   while ((m = headingRegex.exec(text)) !== null) {
     const secNum = parseInt(m[2], 10);
     if (!Number.isFinite(secNum) || secNum < 1 || secNum > 16) continue;
-
     headings.push({
       sec: secNum,
       idx: m.index + (m[1] ? m[1].length : 0),
       title: (m[3] || "").trim(),
     });
   }
+  headings.sort((a, b) => a.idx - b.idx);
 
-  // Başlığa göre kes: targetSec'ten bir sonraki section'a kadar
   function sliceBySectionNumber(targetSec, preferredNextSec) {
     const start = headings.find((h) => h.sec === targetSec);
     if (!start) return null;
 
-    const after = headings
-      .filter((h) => h.idx > start.idx)
-      .sort((a, b) => a.idx - b.idx);
-
+    const after = headings.filter((h) => h.idx > start.idx);
     let end = after.find((h) => h.sec === preferredNextSec);
     if (!end) end = after.find((h) => h.sec > targetSec);
 
     const endIdx = end ? end.idx : text.length;
-    const chunk = text.slice(start.idx, endIdx);
-    return cleanSection(chunk);
+    return cleanSection(text.slice(start.idx, endIdx));
   }
 
-  // Keyword tabanlı fallback:
-  // - Start: keyword geçen en erken index
-  // - End: "SECTION X" / "X." gibi bir sonraki heading veya stop section numaraları
-  function sliceByKeywords(keywords, stopSecs) {
+  function sliceByKeywords(keywords, stopMarkers) {
     let startIdx = -1;
     for (const kw of keywords) {
       const i = upper.indexOf(kw);
@@ -524,73 +607,80 @@ function parseSections(rawText) {
     }
     if (startIdx === -1) return null;
 
-    const after = text.slice(startIdx);
-    const endRegex = /(^|\n)\s*(?:SECTION|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]/gmi;
+    const after = upper.slice(startIdx);
 
-    let endIdx = text.length;
-    let mm;
-    while ((mm = endRegex.exec(after)) !== null) {
-      const sec = parseInt(mm[2], 10);
-      if (stopSecs.includes(sec)) {
-        endIdx = startIdx + mm.index;
-        break;
-      }
-      // stopSecs yoksa bir sonraki heading'e kadar
-      if (!stopSecs || stopSecs.length === 0) {
-        endIdx = startIdx + mm.index;
-        break;
-      }
+    // stopMarkers: array of strings (upper) OR numeric headings
+    let endRel = -1;
+
+    for (const sm of stopMarkers) {
+      const j = after.indexOf(sm);
+      if (j !== -1 && (endRel === -1 || j < endRel)) endRel = j;
     }
 
+    // If stop markers not found, try next section heading
+    if (endRel === -1) {
+      const endRegex = /(^|\n)\s*(?:SECTION|Section|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]/gmi;
+      const tail = text.slice(startIdx);
+      const mm = endRegex.exec(tail);
+      if (mm && mm.index > 0) endRel = mm.index;
+    }
+
+    const endIdx = endRel === -1 ? text.length : startIdx + endRel;
     return cleanSection(text.slice(startIdx, endIdx));
   }
 
-  // --- 1) Önce klasik Section numarasıyla kesmeyi dene ---
+  // 1) numeric slicing first
   let section7 = sliceBySectionNumber(7, 8);
   let section14 = sliceBySectionNumber(14, 15);
 
-  // --- 2) Bulunamazsa başlık kelimeleriyle fallback ---
-  // Section 7 (Handling & Storage) için olası varyantlar
+  // 2) keyword fallbacks
   const s7Keywords = [
     "SECTION 7", "BÖLÜM 7", "BOLUM 7",
     "HANDLING AND STORAGE",
     "HANDLING & STORAGE",
-    "HANDLING / STORAGE",
     "PRECAUTIONS FOR SAFE HANDLING",
     "CONDITIONS FOR SAFE STORAGE",
-    "SAFE HANDLING",
-    "STORAGE CONDITIONS",
+    "SAFE HANDLING", "STORAGE CONDITIONS"
   ];
 
-  // Section 14 (Transport Information) için olası varyantlar
   const s14Keywords = [
     "SECTION 14", "BÖLÜM 14", "BOLUM 14",
     "TRANSPORT INFORMATION",
     "TRANSPORTATION INFORMATION",
-    "TRANSPORT INFO",
-    "TRANSPORT",
-    "UN NUMBER",
-    "UN PROPER SHIPPING NAME",
-    "ADR", "RID", "IMDG", "IATA", "ICAO",
+    "SHIPPING INFORMATION",
+    "TRANSPORT", "TRANSPORTATION", "SHIPPING",
+    "UN NUMBER", "UN PROPER SHIPPING NAME",
+    "ADR", "IMDG", "IATA", "ICAO"
   ];
 
-  if (!section7) section7 = sliceByKeywords(s7Keywords, [8, 9, 10]);
-  if (!section14) section14 = sliceByKeywords(s14Keywords, [15, 16]);
+  // stop markers for section 7 -> section 8 markers
+  const s7Stops = ["SECTION 8", "\n8.", "\n8)", "EXPOSURE CONTROLS", "PERSONAL PROTECTION"];
 
-  // --- 3) Ek fallback: Section 14 hiç yoksa, UN NUMBER gibi göstergelerden kes ---
+  // stop markers for section 14 -> section 15 markers + regulatory
+  const s14Stops = [
+    "SECTION 15", "\n15.", "\n15)", "REGULATORY INFORMATION", "REGULATION INFORMATION",
+    "OTHER INFORMATION", "SECTION 16"
+  ];
+
+  if (!section7) section7 = sliceByKeywords(s7Keywords, s7Stops);
+  if (!section14) section14 = sliceByKeywords(s14Keywords, s14Stops);
+
+  // 3) extra transport fallback: start from UN NUMBER block
   if (!section14) {
-    // UN NUMBER genelde transport bölümünün çekirdeği
-    section14 = sliceByKeywords(["UN NUMBER", "UN NO.", "UNNO", "IATA", "IMDG", "ADR"], [15, 16]);
+    section14 = sliceByKeywords(
+      ["UN NUMBER", "UN NO.", "IMDG", "IATA", "ADR"],
+      s14Stops
+    );
   }
 
   return {
-    section7: section7 || "Section 7 / Handling and storage bulunamadı (belge çok farklı formatta veya görüntü tabanlı olabilir).",
-    section14: section14 || "Section 14 / Transport information bulunamadı (belge çok farklı formatta veya görüntü tabanlı olabilir).",
+    section7: section7 || "Handling and storage (Section 7) bulunamadı. (PDF metni görüntü/tablo ağırlıklı olabilir.)",
+    section14: section14 || "Transport information (Section 14) bulunamadı. (PDF metni görüntü/tablo ağırlıklı olabilir.)",
   };
 }
 
 /* -----------------------------
-   Response helpers + CORS
+   Responses + CORS
 -------------------------------- */
 function htmlResponse(html) {
   return new Response(html, {
@@ -644,4 +734,3 @@ async function withCors(promiseResponse) {
   for (const k of Object.keys(ch)) h.set(k, ch[k]);
   return new Response(resp.body, { status: resp.status, headers: h });
 }
-
