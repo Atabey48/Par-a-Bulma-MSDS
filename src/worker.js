@@ -451,86 +451,141 @@ async function assertSafeUrl(raw) {
    Section extraction
 -------------------------------- */
 function normalizeText(text) {
-  return String(text || "")
-    .replace(/\\r\\n?/g, "\\n")
-    .replace(/[ \\t]+/g, " ")
-    .replace(/\\n{3,}/g, "\\n\\n")
-    .trim();
-}
+  let t = String(text || "");
 
-function findFirst(text, regexes) {
-  let best = null;
-  for (const re of regexes) {
-    re.lastIndex = 0;
-    const m = re.exec(text);
-    if (m) {
-      if (!best || m.index < best.index) best = { match: m[0], index: m.index };
-    }
-  }
-  return best;
-}
+  // line endings
+  t = t.replace(/\r\n?/g, "\n");
 
-function cleanSection(section) {
-  const lines = section.split("\\n").map((l) => l.trim());
-  const counts = new Map();
-  for (const l of lines) {
-    if (!l) continue;
-    counts.set(l, (counts.get(l) || 0) + 1);
-  }
-  const filtered = lines.filter((l) => {
-    if (!l) return false;
-    const c = counts.get(l) || 0;
-    if (c >= 3 && l.length < 120) return false;
-    return true;
-  });
-  return filtered.join("\\n").trim();
-}
+  // "S E C T I O N" gibi ayrılmış yazımları toparla
+  t = t.replace(/S\s*E\s*C\s*T\s*I\s*O\s*N/gi, "SECTION");
+  t = t.replace(/T\s*R\s*A\s*N\s*S\s*P\s*O\s*R\s*T/gi, "TRANSPORT");
+  t = t.replace(/H\s*A\s*N\s*D\s*L\s*I\s*N\s*G/gi, "HANDLING");
+  t = t.replace(/S\s*T\s*O\s*R\s*A\s*G\s*E/gi, "STORAGE");
 
-function extractSection(text, startRegexes, endRegexes, fallbackRegexes = []) {
-  const start = findFirst(text, startRegexes) || findFirst(text, fallbackRegexes);
-  if (!start) return null;
+  // Başlıkları satır başına çek (PDF bazen her şeyi tek satır yapar)
+  t = t.replace(/(\s+)(SECTION|Section|BÖLÜM|BOLUM|CHAPTER)\s+/g, "\n$2 ");
+  // "7.", "14)", "14 -" gibi numaralı başlıkları satır başına çek
+  t = t.replace(/(\s+)(\d{1,2}\s*[:.)-]\s+)/g, "\n$2");
 
-  const from = start.index;
-  const afterStart = text.slice(from + start.match.length);
-  const end = findFirst(afterStart, endRegexes);
-  const to = end ? (from + start.match.length + end.index) : text.length;
+  // Fazla boşlukları toparla (satırları koru)
+  t = t.replace(/[ \t]+/g, " ");
+  t = t.replace(/\n{3,}/g, "\n\n");
 
-  return cleanSection(text.slice(from, to));
+  return t.trim();
 }
 
 function parseSections(rawText) {
   const text = normalizeText(rawText);
+  const upper = text.toUpperCase();
 
-  const s7Start = [
-    /(^|\\n)\\s*SECTION\\s*7\\b.*$/im,
-    /(^|\\n)\\s*7\\.\\s*(HANDLING|Handling)\\b.*$/im,
-    /(^|\\n)\\s*7\\)\\s*(HANDLING|Handling)\\b.*$/im,
-  ];
-  const s7Fallback = [/(^|\\n).{0,30}HANDLING AND STORAGE\\b.*$/im];
-  const s7End = [
-    /(^|\\n)\\s*SECTION\\s*8\\b.*$/im,
-    /(^|\\n)\\s*8\\.\\s*/im,
-    /(^|\\n)\\s*8\\)\\s*/im,
+  // Yardımcı: metindeki section başlıklarını indeksle
+  // Örn: "SECTION 7: HANDLING AND STORAGE" / "7. Handling and storage" / "BÖLÜM 14: TAŞIMACILIK BİLGİLERİ"
+  const headingRegex =
+    /(^|\n)\s*(?:SECTION|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]\s*([^\n]{0,160})/gmi;
+
+  const headings = [];
+  let m;
+  while ((m = headingRegex.exec(text)) !== null) {
+    const secNum = parseInt(m[2], 10);
+    if (!Number.isFinite(secNum) || secNum < 1 || secNum > 16) continue;
+
+    headings.push({
+      sec: secNum,
+      idx: m.index + (m[1] ? m[1].length : 0),
+      title: (m[3] || "").trim(),
+    });
+  }
+
+  // Başlığa göre kes: targetSec'ten bir sonraki section'a kadar
+  function sliceBySectionNumber(targetSec, preferredNextSec) {
+    const start = headings.find((h) => h.sec === targetSec);
+    if (!start) return null;
+
+    const after = headings
+      .filter((h) => h.idx > start.idx)
+      .sort((a, b) => a.idx - b.idx);
+
+    let end = after.find((h) => h.sec === preferredNextSec);
+    if (!end) end = after.find((h) => h.sec > targetSec);
+
+    const endIdx = end ? end.idx : text.length;
+    const chunk = text.slice(start.idx, endIdx);
+    return cleanSection(chunk);
+  }
+
+  // Keyword tabanlı fallback:
+  // - Start: keyword geçen en erken index
+  // - End: "SECTION X" / "X." gibi bir sonraki heading veya stop section numaraları
+  function sliceByKeywords(keywords, stopSecs) {
+    let startIdx = -1;
+    for (const kw of keywords) {
+      const i = upper.indexOf(kw);
+      if (i !== -1 && (startIdx === -1 || i < startIdx)) startIdx = i;
+    }
+    if (startIdx === -1) return null;
+
+    const after = text.slice(startIdx);
+    const endRegex = /(^|\n)\s*(?:SECTION|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]/gmi;
+
+    let endIdx = text.length;
+    let mm;
+    while ((mm = endRegex.exec(after)) !== null) {
+      const sec = parseInt(mm[2], 10);
+      if (stopSecs.includes(sec)) {
+        endIdx = startIdx + mm.index;
+        break;
+      }
+      // stopSecs yoksa bir sonraki heading'e kadar
+      if (!stopSecs || stopSecs.length === 0) {
+        endIdx = startIdx + mm.index;
+        break;
+      }
+    }
+
+    return cleanSection(text.slice(startIdx, endIdx));
+  }
+
+  // --- 1) Önce klasik Section numarasıyla kesmeyi dene ---
+  let section7 = sliceBySectionNumber(7, 8);
+  let section14 = sliceBySectionNumber(14, 15);
+
+  // --- 2) Bulunamazsa başlık kelimeleriyle fallback ---
+  // Section 7 (Handling & Storage) için olası varyantlar
+  const s7Keywords = [
+    "SECTION 7", "BÖLÜM 7", "BOLUM 7",
+    "HANDLING AND STORAGE",
+    "HANDLING & STORAGE",
+    "HANDLING / STORAGE",
+    "PRECAUTIONS FOR SAFE HANDLING",
+    "CONDITIONS FOR SAFE STORAGE",
+    "SAFE HANDLING",
+    "STORAGE CONDITIONS",
   ];
 
-  const s14Start = [
-    /(^|\\n)\\s*SECTION\\s*14\\b.*$/im,
-    /(^|\\n)\\s*14\\.\\s*(TRANSPORT|Transport)\\b.*$/im,
-    /(^|\\n)\\s*14\\)\\s*(TRANSPORT|Transport)\\b.*$/im,
-  ];
-  const s14Fallback = [/(^|\\n).{0,30}TRANSPORT INFORMATION\\b.*$/im];
-  const s14End = [
-    /(^|\\n)\\s*SECTION\\s*15\\b.*$/im,
-    /(^|\\n)\\s*15\\.\\s*/im,
-    /(^|\\n)\\s*15\\)\\s*/im,
+  // Section 14 (Transport Information) için olası varyantlar
+  const s14Keywords = [
+    "SECTION 14", "BÖLÜM 14", "BOLUM 14",
+    "TRANSPORT INFORMATION",
+    "TRANSPORTATION INFORMATION",
+    "TRANSPORT INFO",
+    "TRANSPORT",
+    "UN NUMBER",
+    "UN PROPER SHIPPING NAME",
+    "ADR", "RID", "IMDG", "IATA", "ICAO",
   ];
 
-  const section7 = extractSection(text, s7Start, s7End, s7Fallback);
-  const section14 = extractSection(text, s14Start, s14End, s14Fallback);
+  if (!section7) section7 = sliceByKeywords(s7Keywords, [8, 9, 10]);
+  if (!section14) section14 = sliceByKeywords(s14Keywords, [15, 16]);
+
+  // --- 3) Ek fallback: Section 14 hiç yoksa, UN NUMBER gibi göstergelerden kes ---
+  if (!section14) {
+    // UN NUMBER genelde transport bölümünün çekirdeği
+    section14 = sliceByKeywords(["UN NUMBER", "UN NO.", "UNNO", "IATA", "IMDG", "ADR"], [15, 16]);
+  }
 
   return {
-    section7: section7 || "Section 7 bulunamadı (format farklı olabilir).",
-    section14: section14 || "Section 14 bulunamadı (format farklı olabilir).",
+    section7: section7 || "Section 7 / Handling and storage bulunamadı (belge çok farklı formatta veya görüntü tabanlı olabilir).",
+    section14: section14 || "Section 14 / Transport information bulunamadı (belge çok farklı formatta veya görüntü tabanlı olabilir).",
   };
 }
 
@@ -589,3 +644,4 @@ async function withCors(promiseResponse) {
   for (const k of Object.keys(ch)) h.set(k, ch[k]);
   return new Response(resp.body, { status: resp.status, headers: h });
 }
+
