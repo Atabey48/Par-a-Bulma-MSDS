@@ -1,19 +1,33 @@
+import { getDocument } from "pdfjs-serverless";
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Routing
     if (url.pathname === "/") return htmlResponse(UI_HTML);
-    if (url.pathname === "/api/search") return handleSearch(request, env);
-    if (url.pathname === "/api/extract") return handleExtract(request, env);
+
+    if (url.pathname === "/api/search") {
+      return withCors(handleSearch(request, env));
+    }
+
+    if (url.pathname === "/api/extract") {
+      // Preflight support (optional)
+      if (request.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: corsHeaders(),
+        });
+      }
+      return withCors(handleExtract(request, env));
+    }
 
     return new Response("Not Found", { status: 404 });
   },
 };
 
-// -------------------------
-// UI (single-page)
-// -------------------------
+/* -----------------------------
+   UI (Single Page)
+-------------------------------- */
 const UI_HTML = `<!DOCTYPE html>
 <html lang="tr">
 <head>
@@ -71,14 +85,16 @@ const UI_HTML = `<!DOCTYPE html>
     input:focus{border-color: rgba(74,168,216,.55); box-shadow:0 0 0 4px rgba(126,200,227,.22)}
     button{
       border:none; border-radius:12px; padding:12px 14px;
-      font-weight:800; cursor:pointer; color:var(--ink);
+      font-weight:900; cursor:pointer; color:var(--ink);
       background:linear-gradient(135deg,var(--accent),var(--accent2));
       box-shadow:0 10px 18px rgba(74,168,216,.25);
+      transition: transform 120ms ease, box-shadow 120ms ease;
     }
-    button:disabled{opacity:.6; cursor:not-allowed; box-shadow:none}
+    button:hover{transform: translateY(-1px); box-shadow:0 14px 22px rgba(74,168,216,.30)}
+    button:disabled{opacity:.6; cursor:not-allowed; transform:none; box-shadow:none}
     .ghost{
       background:transparent; border:1px solid rgba(20,70,110,0.18);
-      color:var(--text); box-shadow:none; font-weight:800;
+      color:var(--text); box-shadow:none; font-weight:900;
     }
     .status{margin-top:10px; min-height:18px; font-size:13px}
     .status.ok{color:var(--success)} .status.err{color:var(--danger)}
@@ -98,7 +114,7 @@ const UI_HTML = `<!DOCTYPE html>
       border:1px solid rgba(20,70,110,0.18);
       background: rgba(126,200,227,0.10);
       color: rgba(22,50,79,0.85);
-      font-weight:800; font-size:12px;
+      font-weight:900; font-size:12px;
     }
     .actions{display:flex; flex-direction:column; gap:8px; min-width:160px}
     .linkbtn{
@@ -202,6 +218,7 @@ const UI_HTML = `<!DOCTYPE html>
     for(const it of items){
       const d=document.createElement("div");
       d.className="result";
+
       const left=document.createElement("div");
       left.innerHTML = '<h3></h3><div class="meta"><span class="pill"></span><span class="sn"></span></div>';
       left.querySelector("h3").textContent = it.title || "Adsız PDF";
@@ -213,10 +230,11 @@ const UI_HTML = `<!DOCTYPE html>
       const b=document.createElement("button");
       b.textContent="Bölümleri Ayıkla";
       b.onclick=()=>extract(it);
+
       const a=document.createElement("a");
       a.className="linkbtn"; a.href=it.link; a.target="_blank"; a.rel="noopener noreferrer"; a.textContent="PDF Aç";
-      act.appendChild(b); act.appendChild(a);
 
+      act.appendChild(b); act.appendChild(a);
       d.appendChild(left); d.appendChild(act);
       res.appendChild(d);
     }
@@ -227,6 +245,7 @@ const UI_HTML = `<!DOCTYPE html>
     meta.textContent = "İşleniyor...";
     s7.textContent="Yükleniyor...";
     s14.textContent="Yükleniyor...";
+
     try{
       const r = await fetch("/api/extract", {
         method:"POST",
@@ -235,6 +254,7 @@ const UI_HTML = `<!DOCTYPE html>
       });
       const data = await r.json();
       if(!r.ok) throw new Error(data.error || "Extract başarısız.");
+
       s7.textContent = data.section7 || "Bulunamadı";
       s14.textContent = data.section14 || "Bulunamadı";
       meta.textContent = "Sayfa: " + (data.pages ?? "?") + " | Kaynak: " + (it.host||"");
@@ -258,9 +278,9 @@ const UI_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-// -------------------------
-// /api/search
-// -------------------------
+/* -----------------------------
+   API: /api/search
+-------------------------------- */
 async function handleSearch(request, env) {
   try {
     const u = new URL(request.url);
@@ -271,7 +291,9 @@ async function handleSearch(request, env) {
       return json({ error: "Worker secrets eksik: GOOGLE_API_KEY / GOOGLE_CX." }, 500);
     }
 
-    const query = `${q} (MSDS OR SDS) filetype:pdf`;
+    // PDF odaklı sorgu
+    const query = `${q} (MSDS OR SDS OR Safety Data Sheet) filetype:pdf`;
+
     const apiUrl =
       "https://www.googleapis.com/customsearch/v1" +
       `?key=${encodeURIComponent(env.GOOGLE_API_KEY)}` +
@@ -281,18 +303,22 @@ async function handleSearch(request, env) {
 
     const resp = await fetch(apiUrl);
     const data = await resp.json().catch(() => ({}));
+
     if (!resp.ok) {
       return json({ error: data?.error?.message || `Google API hata: ${resp.status}` }, 502);
     }
 
     const items = (data.items || [])
-      .filter((it) => it.link && (String(it.mime || "").includes("pdf") || it.link.toLowerCase().includes(".pdf")))
+      .filter((it) => it.link)
       .map((it) => ({
         title: it.title || "",
         link: it.link,
         snippet: it.snippet || "",
         host: it.displayLink || safeHost(it.link),
-      }));
+        mime: it.mime || "",
+      }))
+      // Bazı sonuçlar "viewer" olabilir; yine de gösteriyoruz ama extract tarafında PDF doğrulanacak
+      .slice(0, 10);
 
     return json({ items });
   } catch (e) {
@@ -300,13 +326,14 @@ async function handleSearch(request, env) {
   }
 }
 
-// -------------------------
-// /api/extract
-// -------------------------
-const cache = new Map(); // url -> { expiresAt, value }
+/* -----------------------------
+   API: /api/extract
+-------------------------------- */
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const MAX_PDF_BYTES = 20 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 15000;
+
+const extractCache = new Map(); // url -> { expiresAt, value }
 
 async function handleExtract(request, env) {
   try {
@@ -316,17 +343,14 @@ async function handleExtract(request, env) {
     const pdfUrl = String(body?.pdfUrl || "").trim();
     if (!pdfUrl) return json({ error: "pdfUrl gerekli." }, 400);
 
-    // cache
-    const cached = cacheGet(pdfUrl);
+    // Cache
+    const cached = cacheGet(extractCache, pdfUrl);
     if (cached) return json(cached);
 
     const safe = await assertSafeUrl(pdfUrl);
-    const pdfBuf = await fetchPdfAsUint8(safe);
+    const pdfU8 = await fetchPdfAsUint8(safe);
 
-    // pdf parse (edge compatible)
-    const { getDocument } = await import("pdfjs-serverless");
-
-    const doc = await getDocument({ data: pdfBuf, useSystemFonts: true }).promise;
+    const doc = await getDocument({ data: pdfU8, useSystemFonts: true }).promise;
 
     let text = "";
     for (let i = 1; i <= doc.numPages; i++) {
@@ -336,71 +360,73 @@ async function handleExtract(request, env) {
     }
 
     const { section7, section14 } = parseSections(text);
-
     const out = { section7, section14, pages: doc.numPages };
-    cacheSet(pdfUrl, out);
+
+    cacheSet(extractCache, pdfUrl, out);
     return json(out);
   } catch (e) {
     const msg =
-      e?.name === "AbortError" ? "Zaman aşımı: PDF indirilemedi." : (e?.message || "Extract error");
+      e?.name === "AbortError"
+        ? "Zaman aşımı: PDF indirilemedi."
+        : (e?.message || "Extract error");
+
     return json({ error: msg }, 500);
   }
 }
 
-// -------------------------
-// Utilities
-// -------------------------
-function htmlResponse(html) {
-  return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
-}
-
-function json(obj, status = 200) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
-    },
-  });
-}
-
-function safeHost(u) {
-  try { return new URL(u).hostname; } catch { return ""; }
-}
-
-function cacheGet(key) {
-  const it = cache.get(key);
-  if (!it) return null;
-  if (Date.now() > it.expiresAt) {
-    cache.delete(key);
-    return null;
-  }
-  return it.value;
-}
-function cacheSet(key, value) {
-  cache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
-}
-
+/* -----------------------------
+   Fetch PDF (robust) + validate
+-------------------------------- */
 async function fetchPdfAsUint8(url) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+
   try {
-    const resp = await fetch(url, { signal: ctrl.signal });
+    const resp = await fetch(url, {
+      signal: ctrl.signal,
+      redirect: "follow",
+      headers: {
+        // Bazı sunucular UA/Accept ile PDF döndürüyor
+        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/1.0)",
+        "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
+      },
+    });
+
     if (!resp.ok) throw new Error(`PDF indirilemedi (HTTP ${resp.status}).`);
 
+    const ct = (resp.headers.get("content-type") || "").toLowerCase();
     const len = Number(resp.headers.get("content-length") || "0");
     if (len && len > MAX_PDF_BYTES) throw new Error("PDF çok büyük (content-length).");
 
     const ab = await resp.arrayBuffer();
     if (ab.byteLength > MAX_PDF_BYTES) throw new Error("PDF çok büyük (indirilen veri).");
 
-    return new Uint8Array(ab);
+    const u8 = new Uint8Array(ab);
+
+    // PDF "magic header" doğrulaması: ilk ~2KB içinde %PDF- arıyoruz
+    const head = new TextDecoder("latin1").decode(u8.slice(0, Math.min(u8.length, 2048)));
+    const looksLikePdf = head.includes("%PDF-");
+
+    if (!looksLikePdf) {
+      const snippet = head.replace(/\s+/g, " ").slice(0, 240);
+      throw new Error(
+        `Bu URL gerçek PDF döndürmüyor. Content-Type="${ct || "unknown"}". ` +
+        `İlk içerik: "${snippet}". ` +
+        `Genelde "PDF viewer / erişim sayfası / redirect" olur. Başka bir PDF sonucunu deneyin.`
+      );
+    }
+
+    // Content-Type bazen yanlış olabilir; ama magic header varsa devam ediyoruz.
+    return u8;
   } finally {
     clearTimeout(t);
   }
 }
 
-// --- Basic SSRF guard (minimal) ---
+/* -----------------------------
+   SSRF guard (minimal)
+-------------------------------- */
 async function assertSafeUrl(raw) {
   let u;
   try { u = new URL(raw); } catch { throw new Error("Geçersiz URL."); }
@@ -409,26 +435,26 @@ async function assertSafeUrl(raw) {
   const host = u.hostname.toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost")) throw new Error("Güvenlik: localhost engellendi.");
 
-  // Cloudflare Workers ortamında ileri seviye DNS/IP doğrulaması kurgulanabilir,
-  // ancak burada minimal güvenlik: private IP'lere doğrudan URL verilmesini engelle.
-  // (Üretimde: allowlist domain yaklaşımı önerilir.)
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
-    // raw IPv4
+  // IP yazıldıysa private bloklarını engelle
+  if (/^\\d{1,3}(\\.\\d{1,3}){3}$/.test(host)) {
     const parts = host.split(".").map((n) => parseInt(n, 10));
     const [a, b] = parts;
     if (a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254)) {
       throw new Error("Güvenlik: private IP engellendi.");
     }
   }
+
   return u.toString();
 }
 
-// --- Section parsing ---
+/* -----------------------------
+   Section extraction
+-------------------------------- */
 function normalizeText(text) {
   return String(text || "")
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\\r\\n?/g, "\\n")
+    .replace(/[ \\t]+/g, " ")
+    .replace(/\\n{3,}/g, "\\n\\n")
     .trim();
 }
 
@@ -445,7 +471,7 @@ function findFirst(text, regexes) {
 }
 
 function cleanSection(section) {
-  const lines = section.split("\n").map((l) => l.trim());
+  const lines = section.split("\\n").map((l) => l.trim());
   const counts = new Map();
   for (const l of lines) {
     if (!l) continue;
@@ -457,7 +483,7 @@ function cleanSection(section) {
     if (c >= 3 && l.length < 120) return false;
     return true;
   });
-  return filtered.join("\n").trim();
+  return filtered.join("\\n").trim();
 }
 
 function extractSection(text, startRegexes, endRegexes, fallbackRegexes = []) {
@@ -476,27 +502,27 @@ function parseSections(rawText) {
   const text = normalizeText(rawText);
 
   const s7Start = [
-    /(^|\n)\s*SECTION\s*7\b.*$/im,
-    /(^|\n)\s*7\.\s*(HANDLING|Handling)\b.*$/im,
-    /(^|\n)\s*7\)\s*(HANDLING|Handling)\b.*$/im,
+    /(^|\\n)\\s*SECTION\\s*7\\b.*$/im,
+    /(^|\\n)\\s*7\\.\\s*(HANDLING|Handling)\\b.*$/im,
+    /(^|\\n)\\s*7\\)\\s*(HANDLING|Handling)\\b.*$/im,
   ];
-  const s7Fallback = [/(^|\n).{0,30}HANDLING AND STORAGE\b.*$/im];
+  const s7Fallback = [/(^|\\n).{0,30}HANDLING AND STORAGE\\b.*$/im];
   const s7End = [
-    /(^|\n)\s*SECTION\s*8\b.*$/im,
-    /(^|\n)\s*8\.\s*/im,
-    /(^|\n)\s*8\)\s*/im,
+    /(^|\\n)\\s*SECTION\\s*8\\b.*$/im,
+    /(^|\\n)\\s*8\\.\\s*/im,
+    /(^|\\n)\\s*8\\)\\s*/im,
   ];
 
   const s14Start = [
-    /(^|\n)\s*SECTION\s*14\b.*$/im,
-    /(^|\n)\s*14\.\s*(TRANSPORT|Transport)\b.*$/im,
-    /(^|\n)\s*14\)\s*(TRANSPORT|Transport)\b.*$/im,
+    /(^|\\n)\\s*SECTION\\s*14\\b.*$/im,
+    /(^|\\n)\\s*14\\.\\s*(TRANSPORT|Transport)\\b.*$/im,
+    /(^|\\n)\\s*14\\)\\s*(TRANSPORT|Transport)\\b.*$/im,
   ];
-  const s14Fallback = [/(^|\n).{0,30}TRANSPORT INFORMATION\b.*$/im];
+  const s14Fallback = [/(^|\\n).{0,30}TRANSPORT INFORMATION\\b.*$/im];
   const s14End = [
-    /(^|\n)\s*SECTION\s*15\b.*$/im,
-    /(^|\n)\s*15\.\s*/im,
-    /(^|\n)\s*15\)\s*/im,
+    /(^|\\n)\\s*SECTION\\s*15\\b.*$/im,
+    /(^|\\n)\\s*15\\.\\s*/im,
+    /(^|\\n)\\s*15\\)\\s*/im,
   ];
 
   const section7 = extractSection(text, s7Start, s7End, s7Fallback);
@@ -506,4 +532,60 @@ function parseSections(rawText) {
     section7: section7 || "Section 7 bulunamadı (format farklı olabilir).",
     section14: section14 || "Section 14 bulunamadı (format farklı olabilir).",
   };
+}
+
+/* -----------------------------
+   Response helpers + CORS
+-------------------------------- */
+function htmlResponse(html) {
+  return new Response(html, {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+function safeHost(u) {
+  try { return new URL(u).hostname; } catch { return ""; }
+}
+
+function cacheGet(map, key) {
+  const it = map.get(key);
+  if (!it) return null;
+  if (Date.now() > it.expiresAt) {
+    map.delete(key);
+    return null;
+  }
+  return it.value;
+}
+
+function cacheSet(map, key, value, ttlMs = CACHE_TTL_MS) {
+  map.set(key, { value, expiresAt: Date.now() + ttlMs });
+}
+
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+}
+
+async function withCors(promiseResponse) {
+  const resp = await promiseResponse;
+  const h = new Headers(resp.headers);
+  const ch = corsHeaders();
+  for (const k of Object.keys(ch)) h.set(k, ch[k]);
+  return new Response(resp.body, { status: resp.status, headers: h });
 }
