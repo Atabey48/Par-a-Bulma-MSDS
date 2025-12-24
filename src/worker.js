@@ -1,5 +1,15 @@
+// src/worker.js
+// Cloudflare Workers (Module Worker) + embedded single-page UI
+// - Google Custom Search (server-side) -> list PDF links
+// - Server-side PDF fetch + robust text extraction
+// - Extract "Handling and storage" and "Transport information" sections with stricter heading logic
+// - Improve readability: preserve line breaks, de-space letter-spaced text, remove header/footer noise
+
 import { getDocument } from "pdfjs-serverless";
 
+/* =========================
+   Worker Entrypoint
+========================= */
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -21,9 +31,9 @@ export default {
   },
 };
 
-/* -----------------------------
-   UI
--------------------------------- */
+/* =========================
+   UI (Single HTML embedded)
+========================= */
 const UI_HTML = `<!DOCTYPE html>
 <html lang="tr">
 <head>
@@ -123,16 +133,16 @@ const UI_HTML = `<!DOCTYPE html>
     .sectionTitle h3{margin:0; font-size:14px}
     .subinfo{color:var(--muted); font-size:12.5px}
 
-    /* Improved readability for extracted text */
+    /* Readability for extracted text */
     pre{
       margin:0; border:1px solid rgba(20,70,110,0.16);
       border-radius:14px; padding:12px; background:#fffdfa;
       white-space:pre-wrap;
-      line-height:1.7;
+      line-height:1.75;
       min-height:170px;
-      font-size:13.5px;
+      font-size:13.6px;
       word-break:break-word;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
     }
 
     .hint{margin:6px 0 0; color:var(--muted); font-size:13px; line-height:1.45}
@@ -158,7 +168,8 @@ const UI_HTML = `<!DOCTYPE html>
           <button id="btn">Ara</button>
         </div>
         <p class="hint">
-          Arama ve PDF işleme sunucuda yapılır. “Invalid PDF structure” genelde seçilen linkin PDF değil HTML viewer dönmesidir; bu sürüm bunu daha net ayıklar.
+          Arama ve PDF işleme sunucuda yapılır. “direct” etiketli linkler daha çok gerçek PDF olur.
+          Viewer/HTML dönen linklerde PDF bozulabilir.
         </p>
         <div id="st" class="status"></div>
         <div id="res" class="results"></div>
@@ -205,7 +216,7 @@ const UI_HTML = `<!DOCTYPE html>
       const data = await r.json();
       if(!r.ok) throw new Error(data.error || "Arama başarısız.");
       render(data.items||[]);
-      setStatus((data.items||[]).length + " sonuç bulundu. Üsttekiler direct PDF link olmaya daha yakındır.","ok");
+      setStatus((data.items||[]).length + " sonuç bulundu. 'direct' olanları öncelikle deneyin.","ok");
     }catch(e){
       setStatus(e.message||"Hata","err");
     }finally{
@@ -231,6 +242,7 @@ const UI_HTML = `<!DOCTYPE html>
 
       const act=document.createElement("div");
       act.className="actions";
+
       const b=document.createElement("button");
       b.textContent="Bölümleri Ayıkla";
       b.onclick=()=>extract(it);
@@ -258,7 +270,6 @@ const UI_HTML = `<!DOCTYPE html>
       });
       const data = await r.json();
       if(!r.ok) throw new Error(data.error || "Extract başarısız.");
-
       s7.textContent = data.section7 || "Bulunamadı";
       s14.textContent = data.section14 || "Bulunamadı";
       meta.textContent = "Sayfa: " + (data.pages ?? "?") + " | Kaynak: " + (it.host||"");
@@ -282,9 +293,9 @@ const UI_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-/* -----------------------------
+/* =========================
    /api/search
--------------------------------- */
+========================= */
 async function handleSearch(request, env) {
   try {
     const u = new URL(request.url);
@@ -339,13 +350,13 @@ function isLikelyDirectPdfLink(link, mime) {
   if (m.includes("pdf")) return true;
   if (l.endsWith(".pdf")) return true;
   if (l.includes(".pdf?")) return true;
-  if (l.includes("drive.google.com") && l.includes("/view")) return false;
+  if (l.includes("/uc?") && l.includes("export=download")) return true;
   return false;
 }
 
-/* -----------------------------
+/* =========================
    /api/extract
--------------------------------- */
+========================= */
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const MAX_PDF_BYTES = 22 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 25000;
@@ -382,18 +393,20 @@ async function handleExtract(request, env) {
       throw e;
     }
 
-    let text = "";
+    // Robust text extraction: keep line breaks via Y-grouping
+    let fullText = "";
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i);
-      const tc = await page.getTextContent();
-      text += tc.items.map((x) => x.str).join(" ") + "\n";
+      const pageText = await extractPageTextWithLines(page);
+      fullText += pageText + "\n";
     }
 
-    const { section7, section14 } = parseSections(text);
+    const { section7, section14 } = parseSections(fullText);
 
+    // Final display cleanup (headers/footers + spacing)
     const out = {
-      section7: formatForDisplay(section7),
-      section14: formatForDisplay(section14),
+      section7: finalizeForDisplay(section7),
+      section14: finalizeForDisplay(section14),
       pages: doc.numPages,
     };
 
@@ -408,9 +421,125 @@ async function handleExtract(request, env) {
   }
 }
 
-/* -----------------------------
+/* =========================
+   PDF text extraction (line reconstruction)
+========================= */
+async function extractPageTextWithLines(page) {
+  const tc = await page.getTextContent({
+    normalizeWhitespace: false,
+    disableCombineTextItems: false,
+  });
+
+  // Group items by Y (same line)
+  const groups = new Map();
+  const tol = 2.0; // y tolerance
+  for (const it of tc.items || []) {
+    const str = String(it.str || "");
+    if (!str.trim()) continue;
+
+    const tr = it.transform || [1, 0, 0, 1, 0, 0];
+    const x = tr[4] ?? 0;
+    const y = tr[5] ?? 0;
+
+    // find an existing yKey within tolerance
+    let yKey = null;
+    for (const k of groups.keys()) {
+      if (Math.abs(k - y) <= tol) {
+        yKey = k;
+        break;
+      }
+    }
+    if (yKey === null) yKey = y;
+
+    if (!groups.has(yKey)) groups.set(yKey, []);
+    groups.get(yKey).push({
+      x,
+      y: yKey,
+      str,
+      w: typeof it.width === "number" ? it.width : null,
+    });
+  }
+
+  // sort lines top->bottom (higher y first)
+  const ys = Array.from(groups.keys()).sort((a, b) => b - a);
+
+  const lines = [];
+  for (const y of ys) {
+    const items = groups.get(y).sort((a, b) => a.x - b.x);
+
+    let line = "";
+    let lastEnd = null;
+    for (const it of items) {
+      const token = it.str;
+
+      if (!line) {
+        line = token;
+        lastEnd = it.w != null ? it.x + it.w : it.x + token.length * 3;
+        continue;
+      }
+
+      const curX = it.x;
+      const gap = lastEnd != null ? (curX - lastEnd) : 0;
+
+      // Insert space if there's a visible gap and current token doesn't already start with punctuation
+      const needsSpace =
+        gap > 2.5 &&
+        !/^[,.;:)\]]/.test(token) &&
+        !/[([/]\s*$/.test(line);
+
+      line += (needsSpace ? " " : "") + token;
+      lastEnd = it.w != null ? it.x + it.w : it.x + token.length * 3;
+    }
+
+    // Fix "w h i te" style letter-spacing within a line (only when long sequences exist)
+    line = deSpaceLettersInLine(line);
+
+    lines.push(line.trimEnd());
+  }
+
+  return lines.join("\n").trim();
+}
+
+// Collapse sequences of single-letter tokens into a word (only if long enough)
+function deSpaceLettersInLine(line) {
+  const tokens = line.split(/\s+/);
+  const out = [];
+  let i = 0;
+
+  const isLetter = (s) => /^[A-Za-z]$/.test(s);
+
+  while (i < tokens.length) {
+    if (isLetter(tokens[i])) {
+      let j = i;
+      let seq = "";
+      let count = 0;
+      while (j < tokens.length && isLetter(tokens[j])) {
+        seq += tokens[j];
+        count++;
+        j++;
+      }
+
+      // Only join if sequence is long enough (avoid breaking "U N", "pH", etc.)
+      if (count >= 4) {
+        out.push(seq);
+      } else {
+        // keep original spacing for short sequences
+        for (let k = i; k < j; k++) out.push(tokens[k]);
+      }
+      i = j;
+      continue;
+    }
+
+    out.push(tokens[i]);
+    i++;
+  }
+
+  return out.join(" ");
+}
+
+/* =========================
    URL resolve (Google Drive view => direct download)
--------------------------------- */
+========================= */
 function resolvePdfUrl(url) {
   try {
     const u = new URL(url);
@@ -428,9 +557,9 @@ function resolvePdfUrl(url) {
   }
 }
 
-/* -----------------------------
-   Fetch PDF + stronger validation
--------------------------------- */
+/* =========================
+   Fetch PDF + validation
+========================= */
 async function fetchPdfAsUint8(url) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
@@ -440,7 +569,7 @@ async function fetchPdfAsUint8(url) {
       signal: ctrl.signal,
       redirect: "follow",
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/1.3)",
+        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/1.6)",
         Accept: "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
       },
@@ -448,7 +577,6 @@ async function fetchPdfAsUint8(url) {
 
     if (!resp.ok) throw new Error(`PDF indirilemedi (HTTP ${resp.status}).`);
 
-    const ct = (resp.headers.get("content-type") || "").toLowerCase();
     const len = Number(resp.headers.get("content-length") || "0");
     if (len && len > MAX_PDF_BYTES) throw new Error("PDF çok büyük (content-length).");
 
@@ -461,7 +589,7 @@ async function fetchPdfAsUint8(url) {
       const headTxt = new TextDecoder("latin1").decode(u8.slice(0, Math.min(u8.length, 512)));
       const snippet = headTxt.replace(/\s+/g, " ").slice(0, 220);
       throw new Error(
-        `Bu link PDF döndürmüyor (başlık %PDF- ile başlamıyor). Content-Type="${ct || "unknown"}". İlk içerik: "${snippet}".`
+        `Bu link PDF döndürmüyor (başlık %PDF- ile başlamıyor). İlk içerik: "${snippet}".`
       );
     }
 
@@ -480,11 +608,7 @@ async function fetchPdfAsUint8(url) {
 function startsWithPdfHeader(u8) {
   let i = 0;
   if (u8.length >= 3 && u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) i = 3;
-  while (
-    i < u8.length &&
-    (u8[i] === 0x20 || u8[i] === 0x0a || u8[i] === 0x0d || u8[i] === 0x09)
-  )
-    i++;
+  while (i < u8.length && (u8[i] === 0x20 || u8[i] === 0x0a || u8[i] === 0x0d || u8[i] === 0x09)) i++;
 
   const sig = [0x25, 0x50, 0x44, 0x46, 0x2d]; // %PDF-
   for (let k = 0; k < sig.length; k++) {
@@ -500,9 +624,9 @@ function hasPdfEof(u8) {
   return tail.includes("%%EOF");
 }
 
-/* -----------------------------
+/* =========================
    SSRF guard (minimal)
--------------------------------- */
+========================= */
 async function assertSafeUrl(raw) {
   let u;
   try {
@@ -528,204 +652,191 @@ async function assertSafeUrl(raw) {
   return u.toString();
 }
 
-/* -----------------------------
-   Section extraction (stronger)
--------------------------------- */
+/* =========================
+   Section extraction (fix your exact issue)
+   - Do NOT treat "7 - 7 <10%" as Section 7
+   - Only accept Section 7 headings if they include handling/storage keywords
+========================= */
 function normalizeText(text) {
   let t = String(text || "");
   t = t.replace(/\r\n?/g, "\n");
 
-  t = t.replace(/S\s*E\s*C\s*T\s*I\s*O\s*N/gi, "SECTION");
-  t = t.replace(/T\s*R\s*A\s*N\s*S\s*P\s*O\s*R\s*T/gi, "TRANSPORT");
-  t = t.replace(/S\s*H\s*I\s*P\s*P\s*I\s*N\s*G/gi, "SHIPPING");
-  t = t.replace(/H\s*A\s*N\s*D\s*L\s*I\s*N\s*G/gi, "HANDLING");
-  t = t.replace(/S\s*T\s*O\s*R\s*A\s*G\s*E/gi, "STORAGE");
-
-  t = t.replace(/(\s+)(SECTION)(\d{1,2})/gi, "\n$2 $3");
-  t = t.replace(/(\s+)(SECTION|Section|BÖLÜM|BOLUM|CHAPTER)\s+/g, "\n$2 ");
-  t = t.replace(/(\s+)(\d{1,2}\s*[:.)-]\s+)/g, "\n$2");
+  // Light whitespace normalize (keep line breaks)
   t = t.replace(/[ \t]+/g, " ");
   t = t.replace(/\n{3,}/g, "\n\n");
-  return t.trim();
-}
 
-function cleanSection(section) {
-  const lines = section.split("\n").map((l) => l.trim());
-  const counts = new Map();
-  for (const l of lines) {
-    if (!l) continue;
-    counts.set(l, (counts.get(l) || 0) + 1);
-  }
-  const filtered = lines.filter((l) => {
-    if (!l) return false;
-    const c = counts.get(l) || 0;
-    if (c >= 3 && l.length < 120) return false;
-    return true;
-  });
-  return filtered.join("\n").trim();
+  // Fix spaced-letter headings ONLY when there ARE spaces between letters (\\s+ not \\s*)
+  // This avoids turning normal "handling" into "HANDLING".
+  t = t.replace(/S\s+E\s+C\s+T\s+I\s+O\s+N/gi, "SECTION");
+  t = t.replace(/H\s+A\s+N\s+D\s+L\s+I\s+N\s+G/gi, "Handling");
+  t = t.replace(/S\s+T\s+O\s+R\s+A\s+G\s+E/gi, "Storage");
+  t = t.replace(/T\s+R\s+A\s+N\s+S\s+P\s+O\s+R\s+T/gi, "Transport");
+  t = t.replace(/S\s+H\s+I\s+P\s+P\s+I\s+N\s+G/gi, "Shipping");
+
+  return t.trim();
 }
 
 function parseSections(rawText) {
   const text = normalizeText(rawText);
   const upper = text.toUpperCase();
 
-  const headingRegex =
-    /(^|\n)\s*(?:SECTION|Section|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]\s*([^\n]{0,180})/gim;
+  // Heading candidates (line-based)
+  // Examples:
+  // "SECTION 7: HANDLING AND STORAGE"
+  // "7. Handling and Storage"
+  // "14 TRANSPORT INFORMATION"
+  const headingRe =
+    /(^|\n)\s*(?:SECTION|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]?\s*([^\n]{0,220})/gim;
 
   const headings = [];
   let m;
-  while ((m = headingRegex.exec(text)) !== null) {
+  while ((m = headingRe.exec(text)) !== null) {
     const secNum = parseInt(m[2], 10);
     if (!Number.isFinite(secNum) || secNum < 1 || secNum > 16) continue;
-    headings.push({
-      sec: secNum,
-      idx: m.index + (m[1] ? m[1].length : 0),
-      title: (m[3] || "").trim(),
-    });
+
+    const idx = m.index + (m[1] ? m[1].length : 0);
+    const title = (m[3] || "").trim();
+
+    // Require *strong* evidence for section 7 / 14.
+    // This directly fixes your "7 - 7 <10%" false start.
+    if (secNum === 7) {
+      const tt = title.toUpperCase();
+      const ok = /HANDLING|STORAGE/.test(tt) || /HANDLING AND STORAGE/.test(tt);
+      if (!ok) continue;
+    }
+    if (secNum === 14) {
+      const tt = title.toUpperCase();
+      const ok = /TRANSPORT|TRANSPORTATION|SHIPPING|UN NUMBER|IATA|IMDG|ADR/.test(tt);
+      if (!ok) continue;
+    }
+
+    headings.push({ sec: secNum, idx, title });
   }
+
   headings.sort((a, b) => a.idx - b.idx);
 
-  function sliceBySectionNumber(targetSec, preferredNextSec) {
-    const start = headings.find((h) => h.sec === targetSec);
+  function sliceByHeading(secNum, nextSecNum) {
+    const start = headings.find((h) => h.sec === secNum);
     if (!start) return null;
 
     const after = headings.filter((h) => h.idx > start.idx);
-    let end = after.find((h) => h.sec === preferredNextSec);
-    if (!end) end = after.find((h) => h.sec > targetSec);
+
+    // Prefer the exact next section number
+    let end = after.find((h) => h.sec === nextSecNum);
+    // Otherwise, take the next heading after start
+    if (!end) end = after[0] || null;
 
     const endIdx = end ? end.idx : text.length;
     return cleanSection(text.slice(start.idx, endIdx));
   }
 
-  function sliceByKeywords(keywords, stopMarkers) {
-    let startIdx = -1;
-    for (const kw of keywords) {
-      const i = upper.indexOf(kw);
-      if (i !== -1 && (startIdx === -1 || i < startIdx)) startIdx = i;
-    }
-    if (startIdx === -1) return null;
+  // Primary: strict headings
+  let section7 = sliceByHeading(7, 8);
+  let section14 = sliceByHeading(14, 15);
 
-    const after = upper.slice(startIdx);
-    let endRel = -1;
+  // Fallback keyword-based (only if strict heading missing)
+  if (!section7) section7 = sliceByKeywords(upper, text, ["SECTION 7", "HANDLING AND STORAGE", "HANDLING & STORAGE"], ["SECTION 8", "EXPOSURE CONTROLS", "PERSONAL PROTECTION"]);
+  if (!section14) section14 = sliceByKeywords(upper, text, ["SECTION 14", "TRANSPORT INFORMATION", "TRANSPORTATION INFORMATION", "SHIPPING INFORMATION"], ["SECTION 15", "REGULATORY INFORMATION", "SECTION 16", "OTHER INFORMATION"]);
 
-    for (const sm of stopMarkers) {
-      const j = after.indexOf(sm);
-      if (j !== -1 && (endRel === -1 || j < endRel)) endRel = j;
-    }
-
-    if (endRel === -1) {
-      const endRegex = /(^|\n)\s*(?:SECTION|Section|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]/gim;
-      const tail = text.slice(startIdx);
-      const mm = endRegex.exec(tail);
-      if (mm && mm.index > 0) endRel = mm.index;
-    }
-
-    const endIdx = endRel === -1 ? text.length : startIdx + endRel;
-    return cleanSection(text.slice(startIdx, endIdx));
-  }
-
-  let section7 = sliceBySectionNumber(7, 8);
-  let section14 = sliceBySectionNumber(14, 15);
-
-  const s7Keywords = [
-    "SECTION 7", "BÖLÜM 7", "BOLUM 7",
-    "HANDLING AND STORAGE",
-    "HANDLING & STORAGE",
-    "PRECAUTIONS FOR SAFE HANDLING",
-    "CONDITIONS FOR SAFE STORAGE",
-    "SAFE HANDLING", "STORAGE CONDITIONS"
-  ];
-
-  const s14Keywords = [
-    "SECTION 14", "BÖLÜM 14", "BOLUM 14",
-    "TRANSPORT INFORMATION",
-    "TRANSPORTATION INFORMATION",
-    "SHIPPING INFORMATION",
-    "TRANSPORT", "TRANSPORTATION", "SHIPPING",
-    "UN NUMBER", "UN PROPER SHIPPING NAME",
-    "ADR", "IMDG", "IATA", "ICAO"
-  ];
-
-  const s7Stops = ["SECTION 8", "\n8.", "\n8)", "EXPOSURE CONTROLS", "PERSONAL PROTECTION"];
-  const s14Stops = [
-    "SECTION 15", "\n15.", "\n15)", "REGULATORY INFORMATION", "REGULATION INFORMATION",
-    "OTHER INFORMATION", "SECTION 16"
-  ];
-
-  if (!section7) section7 = sliceByKeywords(s7Keywords, s7Stops);
-  if (!section14) section14 = sliceByKeywords(s14Keywords, s14Stops);
-
-  if (!section14) {
-    section14 = sliceByKeywords(["UN NUMBER", "UN NO.", "IMDG", "IATA", "ADR"], s14Stops);
-  }
+  // Last fallback for Section 14: UN/ADR/IATA blocks
+  if (!section14) section14 = sliceByKeywords(upper, text, ["UN NUMBER", "ADR", "IMDG", "IATA", "ICAO"], ["SECTION 15", "REGULATORY INFORMATION", "SECTION 16", "OTHER INFORMATION"]);
 
   return {
-    section7: section7 || "Handling and storage (Section 7) bulunamadı. (PDF metni görüntü/tablo ağırlıklı olabilir.)",
-    section14: section14 || "Transport information (Section 14) bulunamadı. (PDF metni görüntü/tablo ağırlıklı olabilir.)",
+    section7: section7 || "Handling and storage (Section 7) bulunamadı. (Belge görüntü/tablo ağırlıklı olabilir.)",
+    section14: section14 || "Transport information (Section 14) bulunamadı. (Belge görüntü/tablo ağırlıklı olabilir.)",
   };
 }
 
-/* -----------------------------
-   Display formatting (fix "bozuk" reading)
--------------------------------- */
-function formatForDisplay(sectionText) {
-  let t = String(sectionText || "");
+function sliceByKeywords(upperAll, textAll, startKeys, stopKeys) {
+  let startIdx = -1;
+  for (const k of startKeys) {
+    const i = upperAll.indexOf(k);
+    if (i !== -1 && (startIdx === -1 || i < startIdx)) startIdx = i;
+  }
+  if (startIdx === -1) return null;
 
-  // 1) Normalize newlines
-  t = t.replace(/\r\n?/g, "\n");
-
-  // 2) Collapse excessive spaces/tabs but preserve newlines
-  t = t.replace(/[ \t]+/g, " ");
-
-  // 3) Join hyphenated line breaks: "stor-\nage" -> "storage"
-  t = t.replace(/([A-Za-z])-\n([A-Za-z])/g, "$1$2");
-
-  // 4) Fix spacing around punctuation
-  t = t.replace(/\s*:\s*/g, ": ");
-  t = t.replace(/\s*;\s*/g, "; ");
-  t = t.replace(/\s*,\s*/g, ", ");
-
-  // 5) Merge short broken lines (keep bullets/headers separate)
-  const rawLines = t.split("\n").map((l) => l.trim()).filter(Boolean);
-  const merged = [];
-  for (let i = 0; i < rawLines.length; i++) {
-    const cur = rawLines[i];
-    const next = rawLines[i + 1];
-
-    const endsWithHardStop = /[.!?:]$/.test(cur);
-    const looksLikeBullet = /^(\-|\u2022|\*|\d+[\)\.])\s+/.test(cur);
-    const looksLikeHeader = /^[A-Z0-9][A-Z0-9 \-()\/]{6,}$/.test(cur); // ALLCAPS-ish
-    const looksLikeTableRow = /\b(UN\s*NUMBER|ADR|IMDG|IATA|ICAO|RID)\b/i.test(cur);
-
-    if (looksLikeBullet || looksLikeHeader || looksLikeTableRow) {
-      merged.push(cur);
-      continue;
-    }
-
-    // If this is a short line and not a sentence end, merge with next
-    if (next && cur.length < 65 && !endsWithHardStop) {
-      merged.push(cur + " " + next);
-      i++;
-      continue;
-    }
-
-    merged.push(cur);
+  const upperAfter = upperAll.slice(startIdx);
+  let endRel = -1;
+  for (const s of stopKeys) {
+    const j = upperAfter.indexOf(s);
+    if (j !== -1 && (endRel === -1 || j < endRel)) endRel = j;
   }
 
-  t = merged.join("\n");
-
-  // 6) Standardize bullets
-  t = t.replace(/^(\u2022|\*)\s+/gm, "- ");
-
-  // 7) Reduce multiple blank lines
-  t = t.replace(/\n{3,}/g, "\n\n").trim();
-
-  return t;
+  const endIdx = endRel === -1 ? textAll.length : startIdx + endRel;
+  return cleanSection(textAll.slice(startIdx, endIdx));
 }
 
-/* -----------------------------
+function cleanSection(section) {
+  // Remove obvious header/footer noise inside the section
+  const lines = section.split("\n").map((l) => l.trimEnd());
+
+  const filtered = [];
+  for (const line0 of lines) {
+    const line = line0.trim();
+    if (!line) {
+      filtered.push("");
+      continue;
+    }
+
+    // Drop lines like: "2 - w h i te MS D S _ S G 3 /9"
+    if (looksLikeHeaderFooter(line)) continue;
+
+    filtered.push(line0);
+  }
+
+  // Deduplicate repeated short lines (common footers)
+  const counts = new Map();
+  for (const l of filtered) {
+    const key = l.trim();
+    if (!key) continue;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+
+  const out = filtered.filter((l) => {
+    const key = l.trim();
+    if (!key) return true;
+    const c = counts.get(key) || 0;
+    if (c >= 3 && key.length < 120) return false;
+    return true;
+  });
+
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function looksLikeHeaderFooter(line) {
+  // heuristic: contains "/9" page style + many single letters + "MSDS"
+  const hasPage = /\/\s*\d+\s*$/.test(line) || /\b\d+\s*\/\s*\d+\b/.test(line);
+  const hasMsds = /MSDS/i.test(line) || /(M\s*S\s*D\s*S)/i.test(line);
+  const tokens = line.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return false;
+  const singleLetters = tokens.filter((t) => /^[A-Za-z]$/.test(t)).length;
+  const ratio = singleLetters / tokens.length;
+  return (hasPage && (hasMsds || ratio > 0.45)) || (hasMsds && ratio > 0.55);
+}
+
+/* =========================
+   Final display post-processing
+   - Keep original line breaks (already better now)
+   - Fix hyphenated line breaks
+   - Fix spacing around punctuation
+========================= */
+function finalizeForDisplay(t) {
+  let s = String(t || "");
+
+  s = s.replace(/\r\n?/g, "\n");
+  s = s.replace(/[ \t]+/g, " ");
+  s = s.replace(/([A-Za-z])-\n([A-Za-z])/g, "$1$2");
+  s = s.replace(/\s*:\s*/g, ": ");
+  s = s.replace(/\s*;\s*/g, "; ");
+  s = s.replace(/\s*,\s*/g, ", ");
+  s = s.replace(/\n{3,}/g, "\n\n").trim();
+
+  return s;
+}
+
+/* =========================
    Responses + CORS
--------------------------------- */
+========================= */
 function htmlResponse(html) {
   return new Response(html, {
     headers: {
