@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MSDS Section Extractor</title>
+
+    <!--
+      TEK SEFERLİK AYAR:
+      1) Google Custom Search JSON API'yi aç.
+      2) Bir Custom Search Engine (CSE) oluştur ve Search Engine ID (CX) al.
+      3) Aşağıdaki iki sabiti doldur:
+         GOOGLE_API_KEY = "...."
+         GOOGLE_CX      = "...."
+      Not: HTML-only olduğu için bu anahtar tarayıcıya iner. Ortak cihazda kullanmayın.
+    -->
+
+    <style>
+      :root {
+        /* Cream + light blue palette */
+        --bg: #fbf7ef;            /* cream */
+        --bg-soft: #fffdf8;
+        --card: #ffffff;
+        --border: rgba(20, 70, 110, 0.16);
+        --text: #16324f;
+        --muted: rgba(22, 50, 79, 0.65);
+
+        --accent: #7ec8e3;        /* light blue */
+        --accent-strong: #4aa8d8; /* stronger light blue */
+        --accent-ink: #0f2b3a;
+
+        --danger: #c2413b;
+        --success: #1f7a5a;
+
+        --shadow: 0 14px 34px rgba(15, 43, 58, 0.10);
+        --radius: 16px;
+      }
+
+      *, *::before, *::after { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at 18% 18%, rgba(126, 200, 227, 0.25), transparent 35%),
+          radial-gradient(circle at 85% 5%, rgba(74, 168, 216, 0.18), transparent 28%),
+          linear-gradient(180deg, var(--bg-soft), var(--bg));
+        min-height: 100vh;
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        backdrop-filter: blur(10px);
+        background: rgba(255, 253, 248, 0.70);
+        border-bottom: 1px solid rgba(20, 70, 110, 0.10);
+      }
+
+      .topbar__inner {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 14px 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .brand {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .brand h1 {
+        margin: 0;
+        font-size: 18px;
+        letter-spacing: 0.2px;
+      }
+
+      .brand p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.35;
+      }
+
+      .by {
+        font-size: 8pt; /* requested */
+        color: rgba(22, 50, 79, 0.70);
+        white-space: nowrap;
+        user-select: none;
+      }
+
+      .wrap {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 18px 20px 44px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: 1.1fr 0.9fr;
+        gap: 16px;
+      }
+
+      @media (max-width: 980px) {
+        .grid { grid-template-columns: 1fr; }
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        padding: 16px;
+      }
+
+      .card h2 {
+        margin: 0 0 10px;
+        font-size: 16px;
+      }
+
+      .hint {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+        margin-top: 10px;
+      }
+
+      input[type="text"] {
+        width: 100%;
+        border: 1px solid rgba(20, 70, 110, 0.18);
+        background: #fffdfa;
+        border-radius: 12px;
+        padding: 12px 14px;
+        font-size: 15px;
+        color: var(--text);
+        outline: none;
+      }
+      input[type="text"]:focus {
+        border-color: rgba(74, 168, 216, 0.55);
+        box-shadow: 0 0 0 4px rgba(126, 200, 227, 0.22);
+      }
+
+      button {
+        border: none;
+        border-radius: 12px;
+        padding: 12px 14px;
+        font-weight: 700;
+        cursor: pointer;
+        color: var(--accent-ink);
+        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+        box-shadow: 0 10px 18px rgba(74, 168, 216, 0.25);
+        transition: transform 120ms ease, box-shadow 120ms ease;
+      }
+      button:hover { transform: translateY(-1px); box-shadow: 0 14px 22px rgba(74, 168, 216, 0.30); }
+      button:disabled { opacity: 0.6; cursor: not-allowed; transform: none; box-shadow: none; }
+
+      .ghost {
+        background: transparent;
+        border: 1px solid rgba(20, 70, 110, 0.18);
+        color: var(--text);
+        box-shadow: none;
+        font-weight: 700;
+      }
+      .ghost:hover { transform: translateY(-1px); box-shadow: 0 10px 16px rgba(15, 43, 58, 0.08); }
+
+      .status {
+        margin-top: 10px;
+        min-height: 18px;
+        font-size: 13px;
+      }
+      .status.ok { color: var(--success); }
+      .status.err { color: var(--danger); }
+
+      .results {
+        margin-top: 12px;
+        display: grid;
+        gap: 10px;
+      }
+
+      .result {
+        border: 1px solid rgba(20, 70, 110, 0.16);
+        border-radius: 14px;
+        padding: 12px;
+        background: rgba(255, 253, 248, 0.70);
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+        align-items: start;
+      }
+
+      @media (max-width: 640px) {
+        .row { grid-template-columns: 1fr; }
+        button { width: 100%; }
+        .result { grid-template-columns: 1fr; }
+      }
+
+      .result h3 {
+        margin: 0 0 6px;
+        font-size: 14px;
+        line-height: 1.35;
+      }
+
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(20, 70, 110, 0.18);
+        background: rgba(126, 200, 227, 0.10);
+        color: rgba(22, 50, 79, 0.85);
+        font-weight: 700;
+        font-size: 12px;
+      }
+
+      .actions {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-width: 160px;
+      }
+
+      .linkbtn {
+        display: inline-flex;
+        justify-content: center;
+        align-items: center;
+        text-decoration: none;
+        border-radius: 12px;
+        padding: 10px 12px;
+        border: 1px solid rgba(20, 70, 110, 0.18);
+        color: var(--text);
+        background: #fffdfa;
+        font-weight: 800;
+      }
+
+      .sectionTitle {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+
+      .sectionTitle h3 {
+        margin: 0;
+        font-size: 14px;
+      }
+
+      .subinfo {
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+
+      pre.sectionBox {
+        margin: 0;
+        border: 1px solid rgba(20, 70, 110, 0.16);
+        border-radius: 14px;
+        padding: 12px;
+        background: #fffdfa;
+        white-space: pre-wrap;
+        line-height: 1.55;
+        min-height: 170px;
+        font-size: 13px;
+      }
+
+      .footer {
+        margin-top: 16px;
+        color: var(--muted);
+        font-size: 12.5px;
+        line-height: 1.45;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="topbar">
+      <div class="topbar__inner">
+        <div class="brand">
+          <h1>MSDS Section Extractor</h1>
+          <p>Parça numarası yaz → PDF MSDS bul → Section 7 & Section 14 göster</p>
+        </div>
+        <div class="by">by Furkan ATABEY</div>
+      </div>
+    </div>
+
+    <div class="wrap">
+      <div class="grid">
+        <section class="card">
+          <h2>Arama</h2>
+          <div class="row">
+            <input id="query" type="text" placeholder="Örn: RTV 102 MSDS" />
+            <button id="btnSearch">Ara</button>
+          </div>
+          <p class="hint">
+            Arama, Google Custom Search API ile <strong>PDF</strong> sonuçları getirir. PDF indirme ve okuma işlemi tarayıcıda yapılır; bazı siteler CORS nedeniyle
+            PDF indirmeyi engelleyebilir.
+          </p>
+          <div id="status" class="status"></div>
+
+          <div id="results" class="results"></div>
+
+          <div class="footer">
+            İpucu: Bazı MSDS’lerde başlıklar “SECTION 7”, “7. HANDLING AND STORAGE”, “SECTION 14”, “14. TRANSPORT INFORMATION” gibi varyasyonlar gösterebilir.
+            Bu uygulama birden fazla varyantı yakalamaya çalışır.
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="sectionTitle">
+            <h3>Section 7: Handling and Storage</h3>
+            <button class="ghost" id="copy7">Kopyala</button>
+          </div>
+          <div class="subinfo" id="selInfo">Seçili PDF yok.</div>
+          <pre id="sec7" class="sectionBox">Bir PDF seçin (Bölümleri Ayıkla).</pre>
+
+          <div style="height: 14px"></div>
+
+          <div class="sectionTitle">
+            <h3>Section 14: Transport Information</h3>
+            <button class="ghost" id="copy14">Kopyala</button>
+          </div>
+          <div class="subinfo" id="metaInfo"></div>
+          <pre id="sec14" class="sectionBox">Bir PDF seçin (Bölümleri Ayıkla).</pre>
+        </section>
+      </div>
+    </div>
+
+    <!-- pdf.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+    <script>
+      /***********************
+       * CONFIG (DOLDUR)
+       ***********************/
+      const GOOGLE_API_KEY = "AIzaSyDIiX7GIe7HEPKpzu0T7sIL0ZPNv5MbyOM";
+      const GOOGLE_CX = "f704e0e135ddc4ba4";
+
+      // İstersen arama sorgusuna otomatik SDS/MSDS eklemeyi aç/kapat:
+      const AUTO_APPEND_MSDS_TERMS = true;
+
+      // Fetch timeout (ms)
+      const FETCH_TIMEOUT_MS = 15000;
+
+      // Maksimum PDF boyutu (bytes) - tarayıcı tarafında her zaman güvenilir ölçüm yapılamayabilir
+      const MAX_PDF_BYTES_SOFT = 20 * 1024 * 1024;
+
+      /***********************
+       * PDF.JS worker
+       ***********************/
+      if (window["pdfjsLib"]) {
+        pdfjsLib.GlobalWorkerOptions.workerSrc =
+          "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      }
+
+      /***********************
+       * DOM
+       ***********************/
+      const elQuery = document.getElementById("query");
+      const elBtnSearch = document.getElementById("btnSearch");
+      const elStatus = document.getElementById("status");
+      const elResults = document.getElementById("results");
+
+      const elSelInfo = document.getElementById("selInfo");
+      const elMetaInfo = document.getElementById("metaInfo");
+
+      const elSec7 = document.getElementById("sec7");
+      const elSec14 = document.getElementById("sec14");
+
+      const elCopy7 = document.getElementById("copy7");
+      const elCopy14 = document.getElementById("copy14");
+
+      const state = {
+        results: [],
+        cacheExtract: new Map() // url -> {section7, section14, pages, host}
+      };
+
+      function setStatus(msg, type = "") {
+        elStatus.textContent = msg || "";
+        elStatus.className = "status " + (type === "err" ? "err" : type === "ok" ? "ok" : "");
+      }
+
+      function hostOf(url) {
+        try { return new URL(url).hostname; } catch { return "unknown"; }
+      }
+
+      function normalizeText(text) {
+        // PDF text extraction can be messy; keep \n but normalize whitespace
+        return text.replace(/\r\n?/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+      }
+
+      function findFirst(text, regexes) {
+        let best = null;
+        for (const re of regexes) {
+          re.lastIndex = 0;
+          const m = re.exec(text);
+          if (m) {
+            if (!best || m.index < best.index) best = { match: m[0], index: m.index };
+          }
+        }
+        return best;
+      }
+
+      function cleanSection(section) {
+        // Light dedupe of repeated short lines (headers/footers)
+        const lines = section.split("\n").map(l => l.trim());
+        const counts = new Map();
+        for (const l of lines) {
+          if (!l) continue;
+          counts.set(l, (counts.get(l) || 0) + 1);
+        }
+        const filtered = lines.filter(l => {
+          if (!l) return false;
+          const c = counts.get(l) || 0;
+          if (c >= 3 && l.length < 120) return false;
+          return true;
+        });
+        return filtered.join("\n").trim();
+      }
+
+      function extractSection(text, startRegexes, endRegexes, fallbackRegexes = []) {
+        const start = findFirst(text, startRegexes) || findFirst(text, fallbackRegexes);
+        if (!start) return null;
+
+        const from = start.index;
+        const afterStart = text.slice(from + start.match.length);
+        const end = findFirst(afterStart, endRegexes);
+        const to = end ? (from + start.match.length + end.index) : text.length;
+
+        return cleanSection(text.slice(from, to));
+      }
+
+      function parseSections(rawText) {
+        const text = normalizeText(rawText);
+
+        const s7Start = [
+          /(^|\n)\s*SECTION\s*7\b.*$/im,
+          /(^|\n)\s*Section\s*7\b.*$/im,
+          /(^|\n)\s*7\.\s*(HANDLING|Handling)\b.*$/im,
+          /(^|\n)\s*7\)\s*(HANDLING|Handling)\b.*$/im
+        ];
+        const s7Fallback = [
+          /(^|\n).{0,30}HANDLING AND STORAGE\b.*$/im
+        ];
+        const s7End = [
+          /(^|\n)\s*SECTION\s*8\b.*$/im,
+          /(^|\n)\s*Section\s*8\b.*$/im,
+          /(^|\n)\s*8\.\s*/im,
+          /(^|\n)\s*8\)\s*/im
+        ];
+
+        const s14Start = [
+          /(^|\n)\s*SECTION\s*14\b.*$/im,
+          /(^|\n)\s*Section\s*14\b.*$/im,
+          /(^|\n)\s*14\.\s*(TRANSPORT|Transport)\b.*$/im,
+          /(^|\n)\s*14\)\s*(TRANSPORT|Transport)\b.*$/im
+        ];
+        const s14Fallback = [
+          /(^|\n).{0,30}TRANSPORT INFORMATION\b.*$/im
+        ];
+        const s14End = [
+          /(^|\n)\s*SECTION\s*15\b.*$/im,
+          /(^|\n)\s*Section\s*15\b.*$/im,
+          /(^|\n)\s*15\.\s*/im,
+          /(^|\n)\s*15\)\s*/im
+        ];
+
+        const section7 = extractSection(text, s7Start, s7End, s7Fallback);
+        const section14 = extractSection(text, s14Start, s14End, s14Fallback);
+
+        return {
+          section7: section7 || "Section 7 bulunamadı (belge formatı farklı olabilir).",
+          section14: section14 || "Section 14 bulunamadı (belge formatı farklı olabilir)."
+        };
+      }
+
+      async function fetchWithTimeout(url, opts = {}) {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+        try {
+          const res = await fetch(url, { ...opts, signal: ctrl.signal });
+          return res;
+        } finally {
+          clearTimeout(t);
+        }
+      }
+
+      async function fetchPdfText(pdfUrl) {
+        // CORS: If server disallows, browser will fail here.
+        const res = await fetchWithTimeout(pdfUrl, { method: "GET" });
+        if (!res.ok) throw new Error("PDF indirilemedi (HTTP " + res.status + ").");
+
+        const ct = (res.headers.get("content-type") || "").toLowerCase();
+        // Some sites don't send correct CT; we still try if it looks like PDF by URL
+        if (!ct.includes("pdf") && !pdfUrl.toLowerCase().includes(".pdf")) {
+          // Try anyway; if not pdf, pdf.js parse will fail.
+        }
+
+        const len = Number(res.headers.get("content-length") || "0");
+        if (len && len > MAX_PDF_BYTES_SOFT) {
+          throw new Error("PDF çok büyük görünüyor (" + Math.round(len / (1024 * 1024)) + "MB).");
+        }
+
+        const buf = await res.arrayBuffer();
+        if (buf.byteLength > MAX_PDF_BYTES_SOFT) {
+          throw new Error("PDF çok büyük (" + Math.round(buf.byteLength / (1024 * 1024)) + "MB).");
+        }
+
+        const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+
+        let text = "";
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          // join with spaces; pdf text order might be imperfect for multi-column docs
+          text += content.items.map(it => it.str).join(" ") + "\n";
+        }
+        return { text, pages: pdf.numPages };
+      }
+
+      function renderResults(items) {
+        elResults.innerHTML = "";
+        if (!items || !items.length) {
+          elResults.innerHTML = `<div class="hint">Sonuç bulunamadı.</div>`;
+          return;
+        }
+
+        for (const item of items) {
+          const host = item.displayLink || hostOf(item.link);
+          const div = document.createElement("div");
+          div.className = "result";
+
+          const left = document.createElement("div");
+          const h3 = document.createElement("h3");
+          h3.textContent = item.title || "Adsız PDF";
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          const pill = document.createElement("span");
+          pill.className = "pill";
+          pill.textContent = host;
+          const snip = document.createElement("span");
+          snip.textContent = item.snippet || "";
+          meta.appendChild(pill);
+          if (snip.textContent) meta.appendChild(snip);
+
+          left.appendChild(h3);
+          left.appendChild(meta);
+
+          const actions = document.createElement("div");
+          actions.className = "actions";
+
+          const btnExtract = document.createElement("button");
+          btnExtract.textContent = "Bölümleri Ayıkla";
+          btnExtract.addEventListener("click", () => handleExtract(item));
+
+          const a = document.createElement("a");
+          a.className = "linkbtn";
+          a.href = item.link;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          a.textContent = "PDF Aç";
+
+          actions.appendChild(btnExtract);
+          actions.appendChild(a);
+
+          div.appendChild(left);
+          div.appendChild(actions);
+          elResults.appendChild(div);
+        }
+      }
+
+      async function googleSearchPdf(query) {
+        if (!GOOGLE_API_KEY || GOOGLE_API_KEY.includes("PASTE_") || !GOOGLE_CX || GOOGLE_CX.includes("PASTE_")) {
+          throw new Error("GOOGLE_API_KEY ve GOOGLE_CX doldurulmalı (HTML içindeki CONFIG bölümünde).");
+        }
+
+        let q = query.trim();
+        if (AUTO_APPEND_MSDS_TERMS) {
+          // add hints; keep user input primary
+          q = `${q} (MSDS OR SDS) filetype:pdf`;
+        }
+
+        const url =
+          "https://www.googleapis.com/customsearch/v1" +
+          `?key=${encodeURIComponent(GOOGLE_API_KEY)}` +
+          `&cx=${encodeURIComponent(GOOGLE_CX)}` +
+          `&q=${encodeURIComponent(q)}` +
+          `&fileType=pdf&num=10&safe=off`;
+
+        const res = await fetchWithTimeout(url);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const msg = data?.error?.message || "Google araması başarısız (HTTP " + res.status + ").";
+          throw new Error(msg);
+        }
+
+        const items = (data.items || [])
+          .filter(it => it.link && (String(it.mime || "").includes("pdf") || it.link.toLowerCase().includes(".pdf")))
+          .map(it => ({
+            title: it.title,
+            link: it.link,
+            snippet: it.snippet,
+            displayLink: it.displayLink,
+            mime: it.mime
+          }));
+
+        return items;
+      }
+
+      async function handleSearch() {
+        const q = elQuery.value.trim();
+        if (!q) {
+          setStatus("Parça numarası / arama terimi girin.", "err");
+          return;
+        }
+
+        elBtnSearch.disabled = true;
+        setStatus("Aranıyor... (PDF sonuçları getiriliyor)", "ok");
+        elResults.innerHTML = "";
+
+        try {
+          const items = await googleSearchPdf(q);
+          state.results = items;
+          renderResults(items);
+          setStatus(`${items.length} PDF bulundu. Bir PDF seçip “Bölümleri Ayıkla” deyin.`, "ok");
+        } catch (e) {
+          console.error(e);
+          setStatus(e.message || "Arama sırasında hata oluştu.", "err");
+          renderResults([]);
+        } finally {
+          elBtnSearch.disabled = false;
+        }
+      }
+
+      async function handleExtract(item) {
+        const url = item.link;
+        const title = item.title || "Adsız PDF";
+        const host = item.displayLink || hostOf(url);
+
+        elSelInfo.textContent = `${title} — ${host}`;
+        elMetaInfo.textContent = "PDF indiriliyor ve analiz ediliyor...";
+        elSec7.textContent = "Yükleniyor...";
+        elSec14.textContent = "Yükleniyor...";
+
+        // cache hit
+        if (state.cacheExtract.has(url)) {
+          const cached = state.cacheExtract.get(url);
+          elSec7.textContent = cached.section7;
+          elSec14.textContent = cached.section14;
+          elMetaInfo.textContent = `Sayfa: ${cached.pages} | Kaynak: ${cached.host} | (Cache)`;
+          return;
+        }
+
+        try {
+          const { text, pages } = await fetchPdfText(url);
+          const { section7, section14 } = parseSections(text);
+
+          state.cacheExtract.set(url, { section7, section14, pages, host });
+
+          elSec7.textContent = section7;
+          elSec14.textContent = section14;
+          elMetaInfo.textContent = `Sayfa: ${pages} | Kaynak: ${host}`;
+        } catch (e) {
+          console.error(e);
+          const msg =
+            (e.name === "AbortError")
+              ? "Zaman aşımı: PDF indirilemedi/işlenemedi."
+              : (e.message || "PDF işlenirken hata oluştu.");
+
+          // Most common HTML-only failure
+          const corsHint =
+            " Eğer konsolda 'CORS' görüyorsanız, bu PDF kaynağı tarayıcıdan indirmeye izin vermiyor. HTML-only sürümde bu normaldir.";
+
+          elSec7.textContent = "Hata: " + msg + corsHint;
+          elSec14.textContent = "Hata: " + msg + corsHint;
+          elMetaInfo.textContent = "";
+        }
+      }
+
+      async function copyText(text) {
+        try {
+          await navigator.clipboard.writeText(text);
+          setStatus("Panoya kopyalandı.", "ok");
+        } catch {
+          setStatus("Kopyalama başarısız (tarayıcı izni gerekebilir).", "err");
+        }
+      }
+
+      elBtnSearch.addEventListener("click", handleSearch);
+      elQuery.addEventListener("keydown", (e) => { if (e.key === "Enter") handleSearch(); });
+
+      elCopy7.addEventListener("click", () => copyText(elSec7.textContent || ""));
+      elCopy14.addEventListener("click", () => copyText(elSec14.textContent || ""));
+
+      // Initial
+      setStatus("", "");
+    </script>
+  </body>
+</html>
