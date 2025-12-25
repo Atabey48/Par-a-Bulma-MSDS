@@ -2,8 +2,8 @@
 // Cloudflare Workers (Module Worker) + embedded single-page UI
 // - Google Custom Search (server-side) -> list PDF links
 // - Server-side PDF fetch + robust text extraction
-// - Extract "Handling and storage" and "Transport information" sections with stricter heading logic
-// - Improve readability: preserve line breaks, de-space letter-spaced text, remove header/footer noise
+// - Extract "Handling and storage" and "Transport information"
+// - ALSO extract MIL-PRF codes from PDF text and show in UI
 
 import { getDocument } from "pdfjs-serverless";
 
@@ -11,7 +11,7 @@ import { getDocument } from "pdfjs-serverless";
    Worker Entrypoint
 ========================= */
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
     if (url.pathname === "/") return htmlResponse(UI_HTML);
@@ -73,9 +73,11 @@ const UI_HTML = `<!DOCTYPE html>
     .brand h1{margin:0; font-size:18px; letter-spacing:.2px}
     .brand p{margin:2px 0 0; color:var(--muted); font-size:13px; line-height:1.35}
     .by{font-size:8pt; color: rgba(22,50,79,.70); white-space:nowrap; user-select:none}
+
     .wrap{max-width:1100px; margin:0 auto; padding:18px 20px 44px}
     .grid{display:grid; grid-template-columns:1.1fr .9fr; gap:16px}
     @media(max-width:980px){.grid{grid-template-columns:1fr}}
+
     .card{
       background:var(--card); border:1px solid var(--border);
       border-radius:var(--r); box-shadow:var(--shadow);
@@ -83,12 +85,14 @@ const UI_HTML = `<!DOCTYPE html>
     }
     .row{display:grid; grid-template-columns:1fr auto; gap:10px; margin-top:10px}
     @media(max-width:640px){.row{grid-template-columns:1fr} button{width:100%}}
+
     input{
       width:100%; border:1px solid rgba(20,70,110,0.18);
       background:#fffdfa; border-radius:12px;
       padding:12px 14px; font-size:15px; color:var(--text); outline:none;
     }
     input:focus{border-color: rgba(74,168,216,.55); box-shadow:0 0 0 4px rgba(126,200,227,.22)}
+
     button{
       border:none; border-radius:12px; padding:12px 14px;
       font-weight:900; cursor:pointer; color:var(--ink);
@@ -98,10 +102,12 @@ const UI_HTML = `<!DOCTYPE html>
     }
     button:hover{transform: translateY(-1px); box-shadow:0 14px 22px rgba(74,168,216,.30)}
     button:disabled{opacity:.6; cursor:not-allowed; transform:none; box-shadow:none}
+
     .ghost{
       background:transparent; border:1px solid rgba(20,70,110,0.18);
       color:var(--text); box-shadow:none; font-weight:900;
     }
+
     .status{margin-top:10px; min-height:18px; font-size:13px}
     .status.ok{color:var(--success)} .status.err{color:var(--danger)}
     .results{margin-top:12px; display:grid; gap:10px}
@@ -129,11 +135,26 @@ const UI_HTML = `<!DOCTYPE html>
       padding:10px 12px; border:1px solid rgba(20,70,110,0.18);
       color:var(--text); background:#fffdfa; font-weight:900;
     }
+
     .sectionTitle{display:flex; align-items:baseline; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:8px}
     .sectionTitle h3{margin:0; font-size:14px}
     .subinfo{color:var(--muted); font-size:12.5px}
 
-    /* Readability for extracted text */
+    .kv{
+      display:grid;
+      grid-template-columns: 140px 1fr;
+      gap: 8px 10px;
+      margin: 8px 0 10px;
+      padding: 10px 12px;
+      border: 1px solid rgba(20,70,110,0.14);
+      border-radius: 14px;
+      background: rgba(255,253,248,.65);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .kv .k{color: rgba(22,50,79,.72); font-weight: 900}
+    .kv .v{color: rgba(22,50,79,.92); word-break: break-word}
+
     pre{
       margin:0; border:1px solid rgba(20,70,110,0.16);
       border-radius:14px; padding:12px; background:#fffdfa;
@@ -144,7 +165,6 @@ const UI_HTML = `<!DOCTYPE html>
       word-break:break-word;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
     }
-
     .hint{margin:6px 0 0; color:var(--muted); font-size:13px; line-height:1.45}
   </style>
 </head>
@@ -153,7 +173,7 @@ const UI_HTML = `<!DOCTYPE html>
     <div class="topbar__inner">
       <div class="brand">
         <h1>MSDS Section Extractor</h1>
-        <p>Parça no yaz → PDF bul → Handling & Storage + Transport Information çıkar</p>
+        <p>Parça no yaz → PDF bul → Handling & Storage + Transport Information + MIL-PRF kodunu çıkar</p>
       </div>
       <div class="by">by Furkan ATABEY</div>
     </div>
@@ -180,7 +200,20 @@ const UI_HTML = `<!DOCTYPE html>
           <h3>Handling and storage (Section 7)</h3>
           <button class="ghost" id="c7">Kopyala</button>
         </div>
+
         <div class="subinfo" id="info">Seçili PDF yok.</div>
+
+        <div class="kv">
+          <div class="k">MIL-PRF</div>
+          <div class="v" id="mil">Not found</div>
+
+          <div class="k">Pages</div>
+          <div class="v" id="pg">—</div>
+
+          <div class="k">Source</div>
+          <div class="v" id="src">—</div>
+        </div>
+
         <pre id="s7">Bir PDF seçin (Bölümleri Ayıkla).</pre>
 
         <div style="height:14px"></div>
@@ -199,6 +232,7 @@ const UI_HTML = `<!DOCTYPE html>
   const $ = (id)=>document.getElementById(id);
   const st = $("st"), res = $("res"), btn=$("btn"), q=$("q");
   const s7=$("s7"), s14=$("s14"), info=$("info"), meta=$("meta");
+  const mil=$("mil"), pg=$("pg"), src=$("src");
 
   function setStatus(msg, type=""){
     st.textContent = msg||"";
@@ -261,6 +295,9 @@ const UI_HTML = `<!DOCTYPE html>
     meta.textContent = "İşleniyor...";
     s7.textContent="Yükleniyor...";
     s14.textContent="Yükleniyor...";
+    mil.textContent = "Searching...";
+    pg.textContent = "—";
+    src.textContent = it.host || "—";
 
     try{
       const r = await fetch("/api/extract", {
@@ -270,13 +307,19 @@ const UI_HTML = `<!DOCTYPE html>
       });
       const data = await r.json();
       if(!r.ok) throw new Error(data.error || "Extract başarısız.");
+
       s7.textContent = data.section7 || "Bulunamadı";
       s14.textContent = data.section14 || "Bulunamadı";
-      meta.textContent = "Sayfa: " + (data.pages ?? "?") + " | Kaynak: " + (it.host||"");
+      mil.textContent = (data.milPrf && data.milPrf.length) ? data.milPrf.join(", ") : "Not found";
+      pg.textContent = (data.pages ?? "—");
+      src.textContent = it.host || "—";
+      meta.textContent = "Tamamlandı.";
     }catch(e){
       meta.textContent = "";
       s7.textContent = "Hata: " + (e.message||"");
       s14.textContent = "Hata: " + (e.message||"");
+      mil.textContent = "Not found";
+      pg.textContent = "—";
     }
   }
 
@@ -393,7 +436,6 @@ async function handleExtract(request, env) {
       throw e;
     }
 
-    // Robust text extraction: keep line breaks via Y-grouping
     let fullText = "";
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i);
@@ -402,11 +444,12 @@ async function handleExtract(request, env) {
     }
 
     const { section7, section14 } = parseSections(fullText);
+    const milPrf = extractMilPrf(fullText);
 
-    // Final display cleanup (headers/footers + spacing)
     const out = {
       section7: finalizeForDisplay(section7),
       section14: finalizeForDisplay(section14),
+      milPrf,
       pages: doc.numPages,
     };
 
@@ -422,6 +465,29 @@ async function handleExtract(request, env) {
 }
 
 /* =========================
+   MIL-PRF extractor
+   Captures variants:
+   - MIL-PRF-81733
+   - MIL PRF 680
+   - MILPRF-5606
+   - MIL-PRF-32033/1 (etc)
+========================= */
+function extractMilPrf(text) {
+  const t = String(text || "");
+  const re = /\bMIL\s*-?\s*PRF\s*-?\s*([A-Z0-9]{2,}(?:[-/][A-Z0-9]{1,})*)\b/gi;
+
+  const found = new Set();
+  let m;
+  while ((m = re.exec(t)) !== null) {
+    const code = `MIL-PRF-${String(m[1]).toUpperCase()}`.replace(/--+/g, "-");
+    // Basic sanity: must include at least one digit
+    if (/\d/.test(code)) found.add(code);
+  }
+
+  return Array.from(found).slice(0, 10);
+}
+
+/* =========================
    PDF text extraction (line reconstruction)
 ========================= */
 async function extractPageTextWithLines(page) {
@@ -430,9 +496,8 @@ async function extractPageTextWithLines(page) {
     disableCombineTextItems: false,
   });
 
-  // Group items by Y (same line)
   const groups = new Map();
-  const tol = 2.0; // y tolerance
+  const tol = 2.0;
   for (const it of tc.items || []) {
     const str = String(it.str || "");
     if (!str.trim()) continue;
@@ -441,7 +506,6 @@ async function extractPageTextWithLines(page) {
     const x = tr[4] ?? 0;
     const y = tr[5] ?? 0;
 
-    // find an existing yKey within tolerance
     let yKey = null;
     for (const k of groups.keys()) {
       if (Math.abs(k - y) <= tol) {
@@ -460,7 +524,6 @@ async function extractPageTextWithLines(page) {
     });
   }
 
-  // sort lines top->bottom (higher y first)
   const ys = Array.from(groups.keys()).sort((a, b) => b - a);
 
   const lines = [];
@@ -481,7 +544,6 @@ async function extractPageTextWithLines(page) {
       const curX = it.x;
       const gap = lastEnd != null ? (curX - lastEnd) : 0;
 
-      // Insert space if there's a visible gap and current token doesn't already start with punctuation
       const needsSpace =
         gap > 2.5 &&
         !/^[,.;:)\]]/.test(token) &&
@@ -491,16 +553,13 @@ async function extractPageTextWithLines(page) {
       lastEnd = it.w != null ? it.x + it.w : it.x + token.length * 3;
     }
 
-    // Fix "w h i te" style letter-spacing within a line (only when long sequences exist)
     line = deSpaceLettersInLine(line);
-
     lines.push(line.trimEnd());
   }
 
   return lines.join("\n").trim();
 }
 
-// Collapse sequences of single-letter tokens into a word (only if long enough)
 function deSpaceLettersInLine(line) {
   const tokens = line.split(/\s+/);
   const out = [];
@@ -518,18 +577,11 @@ function deSpaceLettersInLine(line) {
         count++;
         j++;
       }
-
-      // Only join if sequence is long enough (avoid breaking "U N", "pH", etc.)
-      if (count >= 4) {
-        out.push(seq);
-      } else {
-        // keep original spacing for short sequences
-        for (let k = i; k < j; k++) out.push(tokens[k]);
-      }
+      if (count >= 4) out.push(seq);
+      else for (let k = i; k < j; k++) out.push(tokens[k]);
       i = j;
       continue;
     }
-
     out.push(tokens[i]);
     i++;
   }
@@ -569,7 +621,7 @@ async function fetchPdfAsUint8(url) {
       signal: ctrl.signal,
       redirect: "follow",
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/1.6)",
+        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/1.7)",
         Accept: "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
       },
@@ -610,7 +662,7 @@ function startsWithPdfHeader(u8) {
   if (u8.length >= 3 && u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) i = 3;
   while (i < u8.length && (u8[i] === 0x20 || u8[i] === 0x0a || u8[i] === 0x0d || u8[i] === 0x09)) i++;
 
-  const sig = [0x25, 0x50, 0x44, 0x46, 0x2d]; // %PDF-
+  const sig = [0x25, 0x50, 0x44, 0x46, 0x2d];
   for (let k = 0; k < sig.length; k++) {
     if (i + k >= u8.length) return false;
     if (u8[i + k] !== sig[k]) return false;
@@ -653,20 +705,14 @@ async function assertSafeUrl(raw) {
 }
 
 /* =========================
-   Section extraction (fix your exact issue)
-   - Do NOT treat "7 - 7 <10%" as Section 7
-   - Only accept Section 7 headings if they include handling/storage keywords
+   Section extraction
 ========================= */
 function normalizeText(text) {
   let t = String(text || "");
   t = t.replace(/\r\n?/g, "\n");
-
-  // Light whitespace normalize (keep line breaks)
   t = t.replace(/[ \t]+/g, " ");
   t = t.replace(/\n{3,}/g, "\n\n");
 
-  // Fix spaced-letter headings ONLY when there ARE spaces between letters (\\s+ not \\s*)
-  // This avoids turning normal "handling" into "HANDLING".
   t = t.replace(/S\s+E\s+C\s+T\s+I\s+O\s+N/gi, "SECTION");
   t = t.replace(/H\s+A\s+N\s+D\s+L\s+I\s+N\s+G/gi, "Handling");
   t = t.replace(/S\s+T\s+O\s+R\s+A\s+G\s+E/gi, "Storage");
@@ -680,11 +726,6 @@ function parseSections(rawText) {
   const text = normalizeText(rawText);
   const upper = text.toUpperCase();
 
-  // Heading candidates (line-based)
-  // Examples:
-  // "SECTION 7: HANDLING AND STORAGE"
-  // "7. Handling and Storage"
-  // "14 TRANSPORT INFORMATION"
   const headingRe =
     /(^|\n)\s*(?:SECTION|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]?\s*([^\n]{0,220})/gim;
 
@@ -697,8 +738,6 @@ function parseSections(rawText) {
     const idx = m.index + (m[1] ? m[1].length : 0);
     const title = (m[3] || "").trim();
 
-    // Require *strong* evidence for section 7 / 14.
-    // This directly fixes your "7 - 7 <10%" false start.
     if (secNum === 7) {
       const tt = title.toUpperCase();
       const ok = /HANDLING|STORAGE/.test(tt) || /HANDLING AND STORAGE/.test(tt);
@@ -721,24 +760,18 @@ function parseSections(rawText) {
 
     const after = headings.filter((h) => h.idx > start.idx);
 
-    // Prefer the exact next section number
     let end = after.find((h) => h.sec === nextSecNum);
-    // Otherwise, take the next heading after start
     if (!end) end = after[0] || null;
 
     const endIdx = end ? end.idx : text.length;
     return cleanSection(text.slice(start.idx, endIdx));
   }
 
-  // Primary: strict headings
   let section7 = sliceByHeading(7, 8);
   let section14 = sliceByHeading(14, 15);
 
-  // Fallback keyword-based (only if strict heading missing)
   if (!section7) section7 = sliceByKeywords(upper, text, ["SECTION 7", "HANDLING AND STORAGE", "HANDLING & STORAGE"], ["SECTION 8", "EXPOSURE CONTROLS", "PERSONAL PROTECTION"]);
   if (!section14) section14 = sliceByKeywords(upper, text, ["SECTION 14", "TRANSPORT INFORMATION", "TRANSPORTATION INFORMATION", "SHIPPING INFORMATION"], ["SECTION 15", "REGULATORY INFORMATION", "SECTION 16", "OTHER INFORMATION"]);
-
-  // Last fallback for Section 14: UN/ADR/IATA blocks
   if (!section14) section14 = sliceByKeywords(upper, text, ["UN NUMBER", "ADR", "IMDG", "IATA", "ICAO"], ["SECTION 15", "REGULATORY INFORMATION", "SECTION 16", "OTHER INFORMATION"]);
 
   return {
@@ -767,7 +800,6 @@ function sliceByKeywords(upperAll, textAll, startKeys, stopKeys) {
 }
 
 function cleanSection(section) {
-  // Remove obvious header/footer noise inside the section
   const lines = section.split("\n").map((l) => l.trimEnd());
 
   const filtered = [];
@@ -777,14 +809,10 @@ function cleanSection(section) {
       filtered.push("");
       continue;
     }
-
-    // Drop lines like: "2 - w h i te MS D S _ S G 3 /9"
     if (looksLikeHeaderFooter(line)) continue;
-
     filtered.push(line0);
   }
 
-  // Deduplicate repeated short lines (common footers)
   const counts = new Map();
   for (const l of filtered) {
     const key = l.trim();
@@ -804,7 +832,6 @@ function cleanSection(section) {
 }
 
 function looksLikeHeaderFooter(line) {
-  // heuristic: contains "/9" page style + many single letters + "MSDS"
   const hasPage = /\/\s*\d+\s*$/.test(line) || /\b\d+\s*\/\s*\d+\b/.test(line);
   const hasMsds = /MSDS/i.test(line) || /(M\s*S\s*D\s*S)/i.test(line);
   const tokens = line.split(/\s+/).filter(Boolean);
@@ -816,13 +843,9 @@ function looksLikeHeaderFooter(line) {
 
 /* =========================
    Final display post-processing
-   - Keep original line breaks (already better now)
-   - Fix hyphenated line breaks
-   - Fix spacing around punctuation
 ========================= */
 function finalizeForDisplay(t) {
   let s = String(t || "");
-
   s = s.replace(/\r\n?/g, "\n");
   s = s.replace(/[ \t]+/g, " ");
   s = s.replace(/([A-Za-z])-\n([A-Za-z])/g, "$1$2");
@@ -830,7 +853,6 @@ function finalizeForDisplay(t) {
   s = s.replace(/\s*;\s*/g, "; ");
   s = s.replace(/\s*,\s*/g, ", ");
   s = s.replace(/\n{3,}/g, "\n\n").trim();
-
   return s;
 }
 
