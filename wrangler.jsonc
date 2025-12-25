@@ -1,5 +1,5 @@
 {
-  "name": "msds-section-extractor",
+  "name": "parcabulma",
   "main": "src/worker.js",
   "compatibility_date": "2025-12-24"
 }
