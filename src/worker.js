@@ -1,15 +1,16 @@
 // src/worker.js
 // Cloudflare Workers (Module Worker) + embedded single-page UI
-// - Google Custom Search (server-side) -> list PDF links
-// - Server-side PDF fetch + robust text extraction
-// - Extract "Handling and storage" and "Transport information"
-// - ALSO extract MIL-PRF codes from PDF text and show in UI
+// Features:
+// - /                : UI (single HTML)
+// - /api/search?q=   : Google CSE search -> PDF list + MIL-PRF codes from general web results
+// - /api/extract     : POST {pdfUrl} -> Extract "Handling & Storage" (Sec 7) and "Transport Information" (Sec 14) from PDF
+//
+// IMPORTANT:
+// - Set Worker secrets: GOOGLE_API_KEY and GOOGLE_CX
+// - If you host UI elsewhere (GitHub Pages), set API_BASE in UI to your Worker URL.
 
 import { getDocument } from "pdfjs-serverless";
 
-/* =========================
-   Worker Entrypoint
-========================= */
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -21,10 +22,13 @@ export default {
     }
 
     if (url.pathname === "/api/extract") {
-      if (request.method === "OPTIONS") {
-        return new Response(null, { status: 204, headers: corsHeaders() });
-      }
+      if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders() });
       return withCors(handleExtract(request, env));
+    }
+
+    // Health
+    if (url.pathname === "/api/health") {
+      return withCors(Promise.resolve(json({ ok: true })));
     }
 
     return new Response("Not Found", { status: 404 });
@@ -173,7 +177,7 @@ const UI_HTML = `<!DOCTYPE html>
     <div class="topbar__inner">
       <div class="brand">
         <h1>MSDS Section Extractor</h1>
-        <p>Parça no yaz → PDF bul → Handling & Storage + Transport Information + MIL-PRF kodunu çıkar</p>
+        <p>Parça no yaz → PDF MSDS bul → Section 7 & 14 çıkar → ayrıca Google’dan MIL-PRF kodunu bul</p>
       </div>
       <div class="by">by Furkan ATABEY</div>
     </div>
@@ -183,15 +187,28 @@ const UI_HTML = `<!DOCTYPE html>
     <div class="grid">
       <section class="card">
         <h2 style="margin:0 0 10px; font-size:16px">Arama</h2>
+
+        <!-- If UI is hosted on GitHub Pages and backend on Worker, set API_BASE below -->
+        <div class="hint" style="margin-bottom:6px">
+          Not: Eğer bu sayfayı GitHub Pages’ten açıyorsan, isteklerin Worker’a gitmesi için aşağıdaki <b>API_BASE</b> ayarını yapmalısın.
+        </div>
+
         <div class="row">
           <input id="q" type="text" placeholder="Örn: RTV 102 MSDS" />
           <button id="btn">Ara</button>
         </div>
+
         <p class="hint">
-          Arama ve PDF işleme sunucuda yapılır. “direct” etiketli linkler daha çok gerçek PDF olur.
-          Viewer/HTML dönen linklerde PDF bozulabilir.
+          Arama backend (Worker) üzerinden yapılır. PDF listesi yanında <b>MIL-PRF</b> kodları da Google web sonuçlarından yakalanır.
         </p>
+
         <div id="st" class="status"></div>
+
+        <div class="kv">
+          <div class="k">MIL-PRF (Google)</div>
+          <div class="v" id="mil">Not searched</div>
+        </div>
+
         <div id="res" class="results"></div>
       </section>
 
@@ -204,9 +221,6 @@ const UI_HTML = `<!DOCTYPE html>
         <div class="subinfo" id="info">Seçili PDF yok.</div>
 
         <div class="kv">
-          <div class="k">MIL-PRF</div>
-          <div class="v" id="mil">Not found</div>
-
           <div class="k">Pages</div>
           <div class="v" id="pg">—</div>
 
@@ -230,29 +244,58 @@ const UI_HTML = `<!DOCTYPE html>
 
 <script>
   const $ = (id)=>document.getElementById(id);
+
+  // IMPORTANT:
+  // If you open this UI from your Worker domain (recommended), keep API_BASE = "".
+  // If you open UI from GitHub Pages, set API_BASE to your Worker URL:
+  // const API_BASE = "https://your-worker-name.your-subdomain.workers.dev";
+  const API_BASE = "";
+
   const st = $("st"), res = $("res"), btn=$("btn"), q=$("q");
   const s7=$("s7"), s14=$("s14"), info=$("info"), meta=$("meta");
   const mil=$("mil"), pg=$("pg"), src=$("src");
+
+  function apiUrl(path){
+    if(!API_BASE) return new URL(path, window.location.origin).toString();
+    return new URL(path, API_BASE).toString();
+  }
 
   function setStatus(msg, type=""){
     st.textContent = msg||"";
     st.className = "status " + (type==="err"?"err": type==="ok"?"ok":"");
   }
 
+  async function safeJson(resp){
+    const ct = (resp.headers.get("content-type")||"").toLowerCase();
+    if(ct.includes("application/json")) return await resp.json();
+    const txt = await resp.text();
+    // This is where the '<!DOCTYPE ...' issue becomes visible
+    throw new Error("Backend JSON dönmedi. Gelen içerik (ilk 120): " + txt.replace(/\\s+/g," ").slice(0,120));
+  }
+
   async function search(){
     const term = q.value.trim();
     if(!term){ setStatus("Parça numarası / arama terimi girin.", "err"); return; }
+
     btn.disabled=true;
     res.innerHTML="";
     setStatus("Aranıyor...","ok");
+    mil.textContent = "Searching...";
+
     try{
-      const r = await fetch("/api/search?q="+encodeURIComponent(term));
-      const data = await r.json();
+      const r = await fetch(apiUrl("/api/search?q="+encodeURIComponent(term)));
+      const data = await safeJson(r);
       if(!r.ok) throw new Error(data.error || "Arama başarısız.");
+
+      // MIL-PRF from Google web results
+      if (data.milPrf && data.milPrf.length) mil.textContent = data.milPrf.join(", ");
+      else mil.textContent = "Not found";
+
       render(data.items||[]);
-      setStatus((data.items||[]).length + " sonuç bulundu. 'direct' olanları öncelikle deneyin.","ok");
+      setStatus((data.items||[]).length + " PDF bulundu. 'direct' olanları öncelikle deneyin.","ok");
     }catch(e){
       setStatus(e.message||"Hata","err");
+      mil.textContent = "Not found";
     }finally{
       btn.disabled=false;
     }
@@ -261,7 +304,7 @@ const UI_HTML = `<!DOCTYPE html>
   function render(items){
     res.innerHTML="";
     if(!items.length){
-      res.innerHTML = '<div class="hint">Sonuç bulunamadı.</div>';
+      res.innerHTML = '<div class="hint">PDF sonuç bulunamadı.</div>';
       return;
     }
     for(const it of items){
@@ -295,22 +338,20 @@ const UI_HTML = `<!DOCTYPE html>
     meta.textContent = "İşleniyor...";
     s7.textContent="Yükleniyor...";
     s14.textContent="Yükleniyor...";
-    mil.textContent = "Searching...";
     pg.textContent = "—";
     src.textContent = it.host || "—";
 
     try{
-      const r = await fetch("/api/extract", {
+      const r = await fetch(apiUrl("/api/extract"), {
         method:"POST",
         headers:{ "Content-Type":"application/json" },
         body: JSON.stringify({ pdfUrl: it.link })
       });
-      const data = await r.json();
+      const data = await safeJson(r);
       if(!r.ok) throw new Error(data.error || "Extract başarısız.");
 
       s7.textContent = data.section7 || "Bulunamadı";
       s14.textContent = data.section14 || "Bulunamadı";
-      mil.textContent = (data.milPrf && data.milPrf.length) ? data.milPrf.join(", ") : "Not found";
       pg.textContent = (data.pages ?? "—");
       src.textContent = it.host || "—";
       meta.textContent = "Tamamlandı.";
@@ -318,7 +359,6 @@ const UI_HTML = `<!DOCTYPE html>
       meta.textContent = "";
       s7.textContent = "Hata: " + (e.message||"");
       s14.textContent = "Hata: " + (e.message||"");
-      mil.textContent = "Not found";
       pg.textContent = "—";
     }
   }
@@ -349,23 +389,11 @@ async function handleSearch(request, env) {
       return json({ error: "Worker secrets eksik: GOOGLE_API_KEY / GOOGLE_CX." }, 500);
     }
 
-    const query = `${q} (MSDS OR SDS OR "Safety Data Sheet") filetype:pdf`;
+    // 1) PDF search
+    const pdfQuery = `${q} (MSDS OR SDS OR "Safety Data Sheet") filetype:pdf`;
+    const pdfItems = await googleCse(env, pdfQuery, { fileTypePdf: true, num: 10 });
 
-    const apiUrl =
-      "https://www.googleapis.com/customsearch/v1" +
-      `?key=${encodeURIComponent(env.GOOGLE_API_KEY)}` +
-      `&cx=${encodeURIComponent(env.GOOGLE_CX)}` +
-      `&q=${encodeURIComponent(query)}` +
-      `&fileType=pdf&num=10&safe=off`;
-
-    const resp = await fetch(apiUrl);
-    const data = await resp.json().catch(() => ({}));
-
-    if (!resp.ok) {
-      return json({ error: data?.error?.message || `Google API hata: ${resp.status}` }, 502);
-    }
-
-    const raw = (data.items || [])
+    const items = (pdfItems || [])
       .filter((it) => it.link)
       .map((it) => {
         const link = it.link;
@@ -378,12 +406,108 @@ async function handleSearch(request, env) {
           mime: it.mime || "",
           directPdf,
         };
-      });
+      })
+      .sort((a, b) => Number(b.directPdf) - Number(a.directPdf))
+      .slice(0, 10);
 
-    raw.sort((a, b) => Number(b.directPdf) - Number(a.directPdf));
-    return json({ items: raw.slice(0, 10) });
+    // 2) MIL-PRF from general web results (NOT PDF)
+    const milQuery = `${q} ("MIL-PRF" OR "MIL PRF" OR MILPRF)`;
+    const milResults = await googleCse(env, milQuery, { fileTypePdf: false, num: 5 });
+
+    const milFromSnippets = extractMilPrfFromSearchResults(milResults || []);
+
+    // Optionally: fetch 1-2 pages (server-side) to find MIL-PRF if snippets don’t contain it
+    let milPrf = milFromSnippets;
+    if (milPrf.length === 0) {
+      const topLinks = (milResults || []).map((r) => r.link).filter(Boolean).slice(0, 2);
+      milPrf = await extractMilPrfByFetchingPages(topLinks);
+    }
+
+    return json({ items, milPrf: milPrf.slice(0, 10) });
   } catch (e) {
     return json({ error: e?.message || "Search error" }, 500);
+  }
+}
+
+async function googleCse(env, query, opts) {
+  const { fileTypePdf, num } = opts || {};
+  const base =
+    "https://www.googleapis.com/customsearch/v1" +
+    `?key=${encodeURIComponent(env.GOOGLE_API_KEY)}` +
+    `&cx=${encodeURIComponent(env.GOOGLE_CX)}` +
+    `&q=${encodeURIComponent(query)}` +
+    `&num=${encodeURIComponent(String(Math.min(Math.max(num || 5, 1), 10)))}` +
+    `&safe=off`;
+
+  const url = fileTypePdf ? (base + `&fileType=pdf`) : base;
+  const resp = await fetch(url);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(data?.error?.message || `Google API hata: ${resp.status}`);
+  }
+  return data.items || [];
+}
+
+function extractMilPrfFromSearchResults(items) {
+  const found = new Set();
+  for (const it of items || []) {
+    const t = `${it.title || ""} ${it.snippet || ""}`.toUpperCase();
+    for (const code of extractMilPrfCodes(t)) found.add(code);
+  }
+  return Array.from(found);
+}
+
+// Fetch pages (server-side) to extract MIL-PRF codes from HTML
+async function extractMilPrfByFetchingPages(links) {
+  const found = new Set();
+  for (const url of links || []) {
+    try {
+      const safe = await assertSafeUrl(url);
+      const text = await fetchHtmlText(safe);
+      const upper = text.toUpperCase();
+      for (const code of extractMilPrfCodes(upper)) found.add(code);
+      if (found.size >= 6) break;
+    } catch {
+      // ignore
+    }
+  }
+  return Array.from(found);
+}
+
+function extractMilPrfCodes(upperText) {
+  // Handles variants:
+  // MIL-PRF-81733, MIL PRF 680, MILPRF-5606, MIL-PRF-32033/1 etc.
+  const out = new Set();
+  const re = /\bMIL\s*[- ]?\s*PRF\s*[- ]?\s*([0-9]{3,6}[A-Z0-9/-]{0,12})\b/g;
+  let m;
+  while ((m = re.exec(upperText)) !== null) {
+    const code = `MIL-PRF-${m[1]}`.replace(/--+/g, "-");
+    out.add(code);
+  }
+  return Array.from(out);
+}
+
+async function fetchHtmlText(url) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const resp = await fetch(url, {
+      signal: ctrl.signal,
+      redirect: "follow",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/1.8)",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+    if (!resp.ok) throw new Error("HTML fetch failed");
+    const ct = (resp.headers.get("content-type") || "").toLowerCase();
+    // if it’s not HTML, still read small amount
+    const ab = await resp.arrayBuffer();
+    const max = 2 * 1024 * 1024;
+    const u8 = new Uint8Array(ab.slice(0, Math.min(ab.byteLength, max)));
+    return new TextDecoder("utf-8", { fatal: false }).decode(u8);
+  } finally {
+    clearTimeout(t);
   }
 }
 
@@ -402,7 +526,6 @@ function isLikelyDirectPdfLink(link, mime) {
 ========================= */
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const MAX_PDF_BYTES = 22 * 1024 * 1024;
-const FETCH_TIMEOUT_MS = 25000;
 
 const extractCache = new Map();
 
@@ -430,7 +553,7 @@ async function handleExtract(request, env) {
       if (msg.toLowerCase().includes("invalid pdf structure")) {
         throw new Error(
           "Invalid PDF structure: Seçilen link gerçek PDF olmayabilir (viewer/HTML sayfası döndürüyor olabilir) veya PDF bozuk olabilir. " +
-            "Arama listesindeki 'direct' etiketli PDF’leri tercih edin."
+          "Arama listesindeki 'direct' etiketli PDF’leri tercih edin."
         );
       }
       throw e;
@@ -444,12 +567,10 @@ async function handleExtract(request, env) {
     }
 
     const { section7, section14 } = parseSections(fullText);
-    const milPrf = extractMilPrf(fullText);
 
     const out = {
       section7: finalizeForDisplay(section7),
       section14: finalizeForDisplay(section14),
-      milPrf,
       pages: doc.numPages,
     };
 
@@ -465,30 +586,7 @@ async function handleExtract(request, env) {
 }
 
 /* =========================
-   MIL-PRF extractor
-   Captures variants:
-   - MIL-PRF-81733
-   - MIL PRF 680
-   - MILPRF-5606
-   - MIL-PRF-32033/1 (etc)
-========================= */
-function extractMilPrf(text) {
-  const t = String(text || "");
-  const re = /\bMIL\s*-?\s*PRF\s*-?\s*([A-Z0-9]{2,}(?:[-/][A-Z0-9]{1,})*)\b/gi;
-
-  const found = new Set();
-  let m;
-  while ((m = re.exec(t)) !== null) {
-    const code = `MIL-PRF-${String(m[1]).toUpperCase()}`.replace(/--+/g, "-");
-    // Basic sanity: must include at least one digit
-    if (/\d/.test(code)) found.add(code);
-  }
-
-  return Array.from(found).slice(0, 10);
-}
-
-/* =========================
-   PDF text extraction (line reconstruction)
+   PDF helpers
 ========================= */
 async function extractPageTextWithLines(page) {
   const tc = await page.getTextContent({
@@ -589,9 +687,6 @@ function deSpaceLettersInLine(line) {
   return out.join(" ");
 }
 
-/* =========================
-   URL resolve (Google Drive view => direct download)
-========================= */
 function resolvePdfUrl(url) {
   try {
     const u = new URL(url);
@@ -609,19 +704,16 @@ function resolvePdfUrl(url) {
   }
 }
 
-/* =========================
-   Fetch PDF + validation
-========================= */
 async function fetchPdfAsUint8(url) {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  const t = setTimeout(() => ctrl.abort(), 25000);
 
   try {
     const resp = await fetch(url, {
       signal: ctrl.signal,
       redirect: "follow",
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/1.7)",
+        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/1.8)",
         Accept: "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
       },
@@ -640,15 +732,10 @@ async function fetchPdfAsUint8(url) {
     if (!startsWithPdfHeader(u8)) {
       const headTxt = new TextDecoder("latin1").decode(u8.slice(0, Math.min(u8.length, 512)));
       const snippet = headTxt.replace(/\s+/g, " ").slice(0, 220);
-      throw new Error(
-        `Bu link PDF döndürmüyor (başlık %PDF- ile başlamıyor). İlk içerik: "${snippet}".`
-      );
+      throw new Error(`Bu link PDF döndürmüyor (başlık %PDF- ile başlamıyor). İlk içerik: "${snippet}".`);
     }
-
     if (!hasPdfEof(u8)) {
-      throw new Error(
-        "PDF doğrulama başarısız: %%EOF bulunamadı. Bu link büyük ihtimalle PDF viewer/HTML döndürüyor veya içerik bozuk."
-      );
+      throw new Error("PDF doğrulama başarısız: %%EOF bulunamadı. PDF viewer/HTML döndürüyor olabilir.");
     }
 
     return u8;
@@ -662,7 +749,7 @@ function startsWithPdfHeader(u8) {
   if (u8.length >= 3 && u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) i = 3;
   while (i < u8.length && (u8[i] === 0x20 || u8[i] === 0x0a || u8[i] === 0x0d || u8[i] === 0x09)) i++;
 
-  const sig = [0x25, 0x50, 0x44, 0x46, 0x2d];
+  const sig = [0x25, 0x50, 0x44, 0x46, 0x2d]; // %PDF-
   for (let k = 0; k < sig.length; k++) {
     if (i + k >= u8.length) return false;
     if (u8[i + k] !== sig[k]) return false;
@@ -677,34 +764,6 @@ function hasPdfEof(u8) {
 }
 
 /* =========================
-   SSRF guard (minimal)
-========================= */
-async function assertSafeUrl(raw) {
-  let u;
-  try {
-    u = new URL(raw);
-  } catch {
-    throw new Error("Geçersiz URL.");
-  }
-  if (!["http:", "https:"].includes(u.protocol)) throw new Error("Sadece http/https URL.");
-
-  const host = u.hostname.toLowerCase();
-  if (host === "localhost" || host.endsWith(".localhost")) throw new Error("Güvenlik: localhost engellendi.");
-
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
-    const [a, b] = host.split(".").map((n) => parseInt(n, 10));
-    const isPrivate =
-      a === 127 ||
-      a === 10 ||
-      (a === 192 && b === 168) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 169 && b === 254);
-    if (isPrivate) throw new Error("Güvenlik: private IP engellendi.");
-  }
-  return u.toString();
-}
-
-/* =========================
    Section extraction
 ========================= */
 function normalizeText(text) {
@@ -713,6 +772,7 @@ function normalizeText(text) {
   t = t.replace(/[ \t]+/g, " ");
   t = t.replace(/\n{3,}/g, "\n\n");
 
+  // Fix spaced letters in some PDFs
   t = t.replace(/S\s+E\s+C\s+T\s+I\s+O\s+N/gi, "SECTION");
   t = t.replace(/H\s+A\s+N\s+D\s+L\s+I\s+N\s+G/gi, "Handling");
   t = t.replace(/S\s+T\s+O\s+R\s+A\s+G\s+E/gi, "Storage");
@@ -726,6 +786,7 @@ function parseSections(rawText) {
   const text = normalizeText(rawText);
   const upper = text.toUpperCase();
 
+  // Heading-based approach
   const headingRe =
     /(^|\n)\s*(?:SECTION|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]?\s*([^\n]{0,220})/gim;
 
@@ -751,7 +812,6 @@ function parseSections(rawText) {
 
     headings.push({ sec: secNum, idx, title });
   }
-
   headings.sort((a, b) => a.idx - b.idx);
 
   function sliceByHeading(secNum, nextSecNum) {
@@ -759,7 +819,6 @@ function parseSections(rawText) {
     if (!start) return null;
 
     const after = headings.filter((h) => h.idx > start.idx);
-
     let end = after.find((h) => h.sec === nextSecNum);
     if (!end) end = after[0] || null;
 
@@ -770,6 +829,7 @@ function parseSections(rawText) {
   let section7 = sliceByHeading(7, 8);
   let section14 = sliceByHeading(14, 15);
 
+  // Keyword fallback
   if (!section7) section7 = sliceByKeywords(upper, text, ["SECTION 7", "HANDLING AND STORAGE", "HANDLING & STORAGE"], ["SECTION 8", "EXPOSURE CONTROLS", "PERSONAL PROTECTION"]);
   if (!section14) section14 = sliceByKeywords(upper, text, ["SECTION 14", "TRANSPORT INFORMATION", "TRANSPORTATION INFORMATION", "SHIPPING INFORMATION"], ["SECTION 15", "REGULATORY INFORMATION", "SECTION 16", "OTHER INFORMATION"]);
   if (!section14) section14 = sliceByKeywords(upper, text, ["UN NUMBER", "ADR", "IMDG", "IATA", "ICAO"], ["SECTION 15", "REGULATORY INFORMATION", "SECTION 16", "OTHER INFORMATION"]);
@@ -805,10 +865,7 @@ function cleanSection(section) {
   const filtered = [];
   for (const line0 of lines) {
     const line = line0.trim();
-    if (!line) {
-      filtered.push("");
-      continue;
-    }
+    if (!line) { filtered.push(""); continue; }
     if (looksLikeHeaderFooter(line)) continue;
     filtered.push(line0);
   }
@@ -841,9 +898,6 @@ function looksLikeHeaderFooter(line) {
   return (hasPage && (hasMsds || ratio > 0.45)) || (hasMsds && ratio > 0.55);
 }
 
-/* =========================
-   Final display post-processing
-========================= */
 function finalizeForDisplay(t) {
   let s = String(t || "");
   s = s.replace(/\r\n?/g, "\n");
@@ -854,6 +908,30 @@ function finalizeForDisplay(t) {
   s = s.replace(/\s*,\s*/g, ", ");
   s = s.replace(/\n{3,}/g, "\n\n").trim();
   return s;
+}
+
+/* =========================
+   SSRF guard (minimal)
+========================= */
+async function assertSafeUrl(raw) {
+  let u;
+  try { u = new URL(raw); } catch { throw new Error("Geçersiz URL."); }
+  if (!["http:", "https:"].includes(u.protocol)) throw new Error("Sadece http/https URL.");
+
+  const host = u.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost")) throw new Error("Güvenlik: localhost engellendi.");
+
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+    const [a, b] = host.split(".").map((n) => parseInt(n, 10));
+    const isPrivate =
+      a === 127 ||
+      a === 10 ||
+      (a === 192 && b === 168) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 169 && b === 254);
+    if (isPrivate) throw new Error("Güvenlik: private IP engellendi.");
+  }
+  return u.toString();
 }
 
 /* =========================
@@ -879,11 +957,7 @@ function json(obj, status = 200) {
 }
 
 function safeHost(u) {
-  try {
-    return new URL(u).hostname;
-  } catch {
-    return "";
-  }
+  try { return new URL(u).hostname; } catch { return ""; }
 }
 
 function cacheGet(map, key) {
