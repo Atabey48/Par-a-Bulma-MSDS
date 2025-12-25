@@ -5,8 +5,8 @@
 // - GET  /                     : UI
 // - GET  /api/health            : health
 // - GET  /api/search?q=         : MSDS PDF list + MIL-PRF codes (web)
-// - POST /api/extract           : { pdfUrl } -> extract Section 7/14 (server-side PDF parse)
-// - GET  /api/wheels?tail=      : tail number -> Google web scan -> NLG/MLG wheel/tire PNs (clean)
+// - POST /api/extract           : { pdfUrl } -> extract Handling & Storage + Transport Info (server-side PDF parse)
+// - GET  /api/wheels?tail=      : tail number -> Google web scan -> NLG/MLG wheel/tire PNs (separate)
 //
 // Required Worker secrets:
 // - GOOGLE_API_KEY
@@ -54,6 +54,7 @@ const UI_HTML = `<!DOCTYPE html>
   <title>Depot Tools | MSDS + Wheel</title>
   <style>
     :root{
+      /* Default (MSDS) palette (cream + light blue) */
       --bg:#fbf7ef; --bg2:#fffdf8; --card:#ffffff;
       --border: rgba(20,70,110,0.16);
       --text:#16324f; --muted: rgba(22,50,79,0.65);
@@ -63,6 +64,21 @@ const UI_HTML = `<!DOCTYPE html>
       --r:16px;
       font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
     }
+
+    /* Wheel view darker tones (only when body has wheel-theme class) */
+    body.wheel-theme{
+      --bg: #0b1220;
+      --bg2:#0f1a2d;
+      --card:#121f35;
+      --border: rgba(148, 198, 255, 0.18);
+      --text:#e7f0ff;
+      --muted: rgba(231,240,255,0.70);
+      --accent:#3b82f6;
+      --accent2:#22c55e;
+      --ink:#06131f;
+      --shadow: 0 18px 44px rgba(0,0,0,0.35);
+    }
+
     *{box-sizing:border-box}
     body{
       margin:0; color:var(--text);
@@ -72,6 +88,12 @@ const UI_HTML = `<!DOCTYPE html>
         linear-gradient(180deg, var(--bg2), var(--bg));
       min-height:100vh;
     }
+    body.wheel-theme{
+      background:
+        radial-gradient(circle at 12% 18%, rgba(59,130,246,.18), transparent 40%),
+        radial-gradient(circle at 86% 10%, rgba(34,197,94,.12), transparent 38%),
+        linear-gradient(180deg, var(--bg2), var(--bg));
+    }
 
     .topbar{
       position:sticky; top:0; z-index:20;
@@ -79,6 +101,11 @@ const UI_HTML = `<!DOCTYPE html>
       background: rgba(255,253,248,.74);
       border-bottom:1px solid rgba(20,70,110,0.10);
     }
+    body.wheel-theme .topbar{
+      background: rgba(12, 22, 40, 0.72);
+      border-bottom:1px solid rgba(148,198,255,0.12);
+    }
+
     .topbar__inner{
       max-width:1180px; margin:0 auto; padding:12px 16px;
       display:grid; grid-template-columns: 44px 1fr auto; align-items:center; gap:10px;
@@ -90,6 +117,12 @@ const UI_HTML = `<!DOCTYPE html>
       cursor:pointer;
       display:flex; align-items:center; justify-content:center;
       box-shadow: 0 8px 16px rgba(15,43,58,0.06);
+      transition: transform 120ms ease;
+    }
+    body.wheel-theme .hamb{
+      border:1px solid rgba(148,198,255,0.14);
+      background: rgba(18,31,53,0.85);
+      box-shadow: 0 12px 22px rgba(0,0,0,0.25);
     }
     .hamb:hover{transform: translateY(-1px)}
     .hamb .lines{width:18px}
@@ -97,10 +130,12 @@ const UI_HTML = `<!DOCTYPE html>
       display:block; height:2px; background: rgba(22,50,79,.78);
       margin:4px 0; border-radius:2px;
     }
+    body.wheel-theme .hamb .lines span{ background: rgba(231,240,255,.85); }
 
     .brand h1{margin:0; font-size:16px; letter-spacing:.2px}
     .brand p{margin:2px 0 0; color:var(--muted); font-size:12.8px; line-height:1.35}
     .by{font-size:8pt; color: rgba(22,50,79,.70); white-space:nowrap; user-select:none}
+    body.wheel-theme .by{color: rgba(231,240,255,.72);}
 
     .wrap{max-width:1180px; margin:0 auto; padding:16px 16px 44px}
     .grid{display:grid; grid-template-columns:1.15fr .85fr; gap:14px}
@@ -120,7 +155,13 @@ const UI_HTML = `<!DOCTYPE html>
       background:#fffdfa; border-radius:12px;
       padding:12px 14px; font-size:15px; color:var(--text); outline:none;
     }
+    body.wheel-theme input{
+      background: rgba(9,16,28,0.65);
+      border:1px solid rgba(148,198,255,0.16);
+      color: rgba(231,240,255,0.92);
+    }
     input:focus{border-color: rgba(74,168,216,.55); box-shadow:0 0 0 4px rgba(126,200,227,.22)}
+    body.wheel-theme input:focus{border-color: rgba(59,130,246,.55); box-shadow:0 0 0 4px rgba(59,130,246,.18)}
 
     button{
       border:none; border-radius:12px; padding:12px 14px;
@@ -129,6 +170,7 @@ const UI_HTML = `<!DOCTYPE html>
       box-shadow:0 10px 18px rgba(74,168,216,.25);
       transition: transform 120ms ease, box-shadow 120ms ease;
     }
+    body.wheel-theme button{ box-shadow:0 14px 26px rgba(0,0,0,.30); }
     button:hover{transform: translateY(-1px); box-shadow:0 14px 22px rgba(74,168,216,.30)}
     button:disabled{opacity:.6; cursor:not-allowed; transform:none; box-shadow:none}
 
@@ -136,6 +178,7 @@ const UI_HTML = `<!DOCTYPE html>
       background:transparent; border:1px solid rgba(20,70,110,0.18);
       color:var(--text); box-shadow:none; font-weight:900;
     }
+    body.wheel-theme .ghost{ border:1px solid rgba(148,198,255,0.16); }
 
     .status{margin-top:10px; min-height:18px; font-size:13px}
     .status.ok{color:var(--success)} .status.err{color:var(--danger)}
@@ -148,6 +191,10 @@ const UI_HTML = `<!DOCTYPE html>
       background: rgba(255,253,248,.70);
       display:grid; grid-template-columns:1fr auto; gap:10px; align-items:start;
     }
+    body.wheel-theme .result{
+      background: rgba(9,16,28,0.55);
+      border:1px solid rgba(148,198,255,0.14);
+    }
     @media(max-width:640px){.result{grid-template-columns:1fr}}
     .result h3{margin:0 0 6px; font-size:14px; line-height:1.35}
     .meta{display:flex; flex-wrap:wrap; gap:8px; align-items:center; color:var(--muted); font-size:12.5px}
@@ -159,12 +206,21 @@ const UI_HTML = `<!DOCTYPE html>
       color: rgba(22,50,79,0.85);
       font-weight:900; font-size:12px;
     }
+    body.wheel-theme .pill{
+      border:1px solid rgba(148,198,255,0.16);
+      background: rgba(59,130,246,0.12);
+      color: rgba(231,240,255,0.88);
+    }
     .actions{display:flex; flex-direction:column; gap:8px; min-width:160px}
     .linkbtn{
       display:inline-flex; justify-content:center; align-items:center;
       text-decoration:none; border-radius:12px;
       padding:10px 12px; border:1px solid rgba(20,70,110,0.18);
       color:var(--text); background:#fffdfa; font-weight:900;
+    }
+    body.wheel-theme .linkbtn{
+      background: rgba(9,16,28,0.65);
+      border:1px solid rgba(148,198,255,0.16);
     }
 
     pre{
@@ -176,6 +232,11 @@ const UI_HTML = `<!DOCTYPE html>
       font-size:13.6px;
       word-break:break-word;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    body.wheel-theme pre{
+      background: rgba(9,16,28,0.65);
+      border:1px solid rgba(148,198,255,0.16);
+      color: rgba(231,240,255,0.92);
     }
 
     .kv{
@@ -190,8 +251,14 @@ const UI_HTML = `<!DOCTYPE html>
       font-size: 13px;
       line-height: 1.45;
     }
+    body.wheel-theme .kv{
+      background: rgba(9,16,28,0.55);
+      border: 1px solid rgba(148,198,255,0.14);
+    }
     .kv .k{color: rgba(22,50,79,.72); font-weight: 900}
     .kv .v{color: rgba(22,50,79,.92); word-break: break-word}
+    body.wheel-theme .kv .k{color: rgba(231,240,255,.72)}
+    body.wheel-theme .kv .v{color: rgba(231,240,255,.92)}
 
     .sectionTitle{
       display:flex; align-items:baseline; justify-content:space-between;
@@ -218,6 +285,11 @@ const UI_HTML = `<!DOCTYPE html>
       padding: 14px;
       display:flex; flex-direction:column; gap:12px;
     }
+    body.wheel-theme .drawer{
+      background: rgba(12,22,40,0.95);
+      border-right: 1px solid rgba(148,198,255,0.14);
+      box-shadow: 22px 0 48px rgba(0,0,0,0.38);
+    }
     .drawer.show{transform: translateX(0);}
     .drawerHeader{display:flex; align-items:center; justify-content:space-between; gap:10px}
     .drawerHeader .t{font-weight: 950}
@@ -227,10 +299,12 @@ const UI_HTML = `<!DOCTYPE html>
       background: #fffdfa;
       cursor:pointer;
     }
-    .menu{
-      display:grid; gap:10px;
-      margin-top: 6px;
+    body.wheel-theme .drawerHeader .x{
+      background: rgba(18,31,53,0.85);
+      border: 1px solid rgba(148,198,255,0.16);
+      color: rgba(231,240,255,0.88);
     }
+    .menu{ display:grid; gap:10px; margin-top: 6px; }
     .menuBtn{
       text-align:left;
       border:1px solid rgba(20,70,110,0.16);
@@ -241,10 +315,20 @@ const UI_HTML = `<!DOCTYPE html>
       font-weight: 950;
       color: rgba(22,50,79,.92);
     }
+    body.wheel-theme .menuBtn{
+      background: rgba(18,31,53,0.85);
+      border: 1px solid rgba(148,198,255,0.14);
+      color: rgba(231,240,255,0.92);
+    }
     .menuBtn small{display:block; color: rgba(22,50,79,.62); font-weight: 700; margin-top: 3px}
+    body.wheel-theme .menuBtn small{color: rgba(231,240,255,.68)}
     .menuBtn.active{
       outline: 3px solid rgba(126,200,227,.20);
       border-color: rgba(74,168,216,.45);
+    }
+    body.wheel-theme .menuBtn.active{
+      outline: 3px solid rgba(59,130,246,.22);
+      border-color: rgba(59,130,246,.45);
     }
 
     .badge{
@@ -258,6 +342,11 @@ const UI_HTML = `<!DOCTYPE html>
       color: rgba(22,50,79,.85);
       user-select:none;
     }
+    body.wheel-theme .badge{
+      background: rgba(59,130,246,0.14);
+      border: 1px solid rgba(148,198,255,0.14);
+      color: rgba(231,240,255,.88);
+    }
 
     /* WHEEL VIEW (screenshot-like) */
     .wheelTable{
@@ -267,6 +356,11 @@ const UI_HTML = `<!DOCTYPE html>
       overflow: hidden;
       background: rgba(255,253,248,.65);
     }
+    body.wheel-theme .wheelTable{
+      background: rgba(9,16,28,0.55);
+      border: 1px solid rgba(148,198,255,0.14);
+    }
+
     .wheelHeader, .wheelRow{
       display:grid;
       grid-template-columns: 1.05fr 0.9fr 0.85fr 0.85fr;
@@ -277,6 +371,11 @@ const UI_HTML = `<!DOCTYPE html>
       background: rgba(126,200,227,0.10);
       border-bottom: 1px solid rgba(20,70,110,0.12);
     }
+    body.wheel-theme .wheelHeader{
+      background: rgba(59,130,246,0.12);
+      border-bottom: 1px solid rgba(148,198,255,0.12);
+    }
+
     .wheelHeader .cell{
       padding: 12px 12px;
       font-weight: 950;
@@ -285,11 +384,17 @@ const UI_HTML = `<!DOCTYPE html>
     }
     .wheelHeader .cell.nlg{color:#2a6fd6}
     .wheelHeader .cell.mlg{color:#7c3aed}
+    body.wheel-theme .wheelHeader .cell.nlg{color: rgba(96,165,250,0.95)}
+    body.wheel-theme .wheelHeader .cell.mlg{color: rgba(167,139,250,0.95)}
 
     .wheelRow .cell{
       padding: 14px 12px;
       border-bottom: 1px solid rgba(20,70,110,0.10);
       background: rgba(255,253,248,.70);
+    }
+    body.wheel-theme .wheelRow .cell{
+      background: rgba(9,16,28,0.55);
+      border-bottom: 1px solid rgba(148,198,255,0.10);
     }
     .wheelRow:last-child .cell{border-bottom:none}
 
@@ -305,6 +410,8 @@ const UI_HTML = `<!DOCTYPE html>
       font-size: 13px;
       line-height: 1.35;
     }
+    body.wheel-theme .airSub{ color: rgba(231,240,255,.72); }
+
     .tag{
       display:inline-flex;
       margin-top: 8px;
@@ -316,6 +423,11 @@ const UI_HTML = `<!DOCTYPE html>
       font-size: 12px;
       color: rgba(22,50,79,.84);
     }
+    body.wheel-theme .tag{
+      border: 1px solid rgba(148,198,255,0.14);
+      background: rgba(59,130,246,0.10);
+      color: rgba(231,240,255,.86);
+    }
 
     .opLine{
       display:flex;
@@ -325,6 +437,7 @@ const UI_HTML = `<!DOCTYPE html>
       color: rgba(22,50,79,.86);
       font-weight: 800;
     }
+    body.wheel-theme .opLine{ color: rgba(231,240,255,.88); }
     .opItem{display:flex; gap:8px; align-items:center}
     .dot{
       width: 8px; height: 8px; border-radius: 999px;
@@ -332,24 +445,18 @@ const UI_HTML = `<!DOCTYPE html>
       border: 1px solid rgba(20,70,110,0.10);
       flex: 0 0 auto;
     }
+    body.wheel-theme .dot{ background: rgba(59,130,246,.70); border: 1px solid rgba(148,198,255,0.14); }
 
-    .pnBox{
-      display:flex;
-      flex-direction:column;
-      gap: 12px;
-      height: 100%;
-    }
-    .pnGroup{
-      display:flex;
-      flex-direction:column;
-      gap: 6px;
-    }
+    .pnBox{ display:flex; flex-direction:column; gap: 12px; height: 100%; }
+    .pnGroup{ display:flex; flex-direction:column; gap: 6px; }
     .pnLabel{
       font-size: 12px;
       font-weight: 950;
       letter-spacing: .2px;
       color: rgba(22,50,79,.62);
     }
+    body.wheel-theme .pnLabel{ color: rgba(231,240,255,.68); }
+
     .pnValue{
       display:inline-flex;
       align-items:center;
@@ -362,18 +469,22 @@ const UI_HTML = `<!DOCTYPE html>
       font-size: 14px;
       color: rgba(22,50,79,.92);
     }
+    body.wheel-theme .pnValue{
+      background: rgba(18,31,53,0.85);
+      border: 1px solid rgba(148,198,255,0.16);
+      color: rgba(231,240,255,0.92);
+    }
     .pnValue.mlg{border-color: rgba(124,58,237,.18)}
     .pnValue.nlg{border-color: rgba(42,111,214,.18)}
+    body.wheel-theme .pnValue.mlg{ border-color: rgba(167,139,250,.28) }
+    body.wheel-theme .pnValue.nlg{ border-color: rgba(96,165,250,.28) }
 
     @media(max-width:980px){
-      .wheelHeader, .wheelRow{
-        grid-template-columns: 1fr;
-      }
+      .wheelHeader, .wheelRow{ grid-template-columns: 1fr; }
       .wheelHeader .cell{display:none;}
       .wheelRow .cell{border-bottom: none;}
-      .wheelRow{
-        border-bottom: 1px solid rgba(20,70,110,0.12);
-      }
+      .wheelRow{ border-bottom: 1px solid rgba(20,70,110,0.12); }
+      body.wheel-theme .wheelRow{ border-bottom: 1px solid rgba(148,198,255,0.12); }
       .wheelRow:last-child{border-bottom:none;}
     }
   </style>
@@ -387,7 +498,7 @@ const UI_HTML = `<!DOCTYPE html>
 
       <div class="brand">
         <h1>Depot Tools</h1>
-        <p id="subtitle">MSDS (Section 7/14) + MIL-PRF • Wheel lookup</p>
+        <p id="subtitle">MSDS (Handling & Storage + Transport Info) • Wheel lookup</p>
       </div>
 
       <div class="by">by Furkan ATABEY</div>
@@ -413,7 +524,7 @@ const UI_HTML = `<!DOCTYPE html>
     </div>
 
     <div class="hint">
-      Not: En stabil kullanım için bu sayfayı Worker domaininden açın (aynı origin).
+      Not: UI ile Worker aynı domaindeyse en stabil çalışır.
     </div>
   </aside>
 
@@ -429,7 +540,7 @@ const UI_HTML = `<!DOCTYPE html>
           </div>
 
           <div class="hint" style="margin-top:8px;">
-            Eğer UI GitHub Pages’te, backend Worker’da ise aşağıdaki API_BASE ayarı gerekir.
+            Eğer UI GitHub Pages’te, backend Worker’da ise API_BASE gerekir.
           </div>
 
           <div class="row">
@@ -453,7 +564,7 @@ const UI_HTML = `<!DOCTYPE html>
 
         <section class="card">
           <div class="sectionTitle">
-            <h3>Handling and storage (Section 7)</h3>
+            <h3>Handling and storage</h3>
             <button class="ghost" id="c7">Kopyala</button>
           </div>
 
@@ -471,7 +582,7 @@ const UI_HTML = `<!DOCTYPE html>
           <div style="height:14px"></div>
 
           <div class="sectionTitle">
-            <h3>Transport information (Section 14)</h3>
+            <h3>Transport information</h3>
             <button class="ghost" id="c14">Kopyala</button>
           </div>
 
@@ -481,13 +592,13 @@ const UI_HTML = `<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- VIEW: WHEEL (GÖRSELDEKİ GİBİ) -->
+    <!-- VIEW: WHEEL (darker + separate NLG/MLG logic) -->
     <div id="viewWheel" style="display:none;">
       <div class="grid">
         <section class="card">
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
             <div style="font-weight:950; font-size:16px;">Wheel</div>
-            <span class="badge">Tail No → Result</span>
+            <span class="badge">Tail → Result</span>
           </div>
 
           <div class="row">
@@ -507,7 +618,7 @@ const UI_HTML = `<!DOCTYPE html>
           </div>
 
           <div class="hint" id="wheelHint">
-            Sadece jant ve lastik bilgileri gösterilir: NLG/MLG için Wheel P/N ve Tire P/N.
+            Sadece NLG/MLG için ayrı ayrı: Wheel P/N ve Tire P/N (veya lastik ölçüsü).
           </div>
         </section>
 
@@ -524,15 +635,13 @@ const UI_HTML = `<!DOCTYPE html>
         </section>
       </div>
     </div>
-
   </div>
 
 <script>
   const $ = (id)=>document.getElementById(id);
 
-  // If you open this UI from Worker domain, keep API_BASE = "".
-  // If you open UI from GitHub Pages, set API_BASE to your Worker URL:
-  // const API_BASE = "https://your-worker-name.your-subdomain.workers.dev";
+  // If UI is hosted on Worker domain, keep API_BASE = "".
+  // If UI is hosted elsewhere (e.g., GitHub Pages), set API_BASE to Worker URL.
   const API_BASE = "";
 
   function apiUrl(path){
@@ -575,6 +684,10 @@ const UI_HTML = `<!DOCTYPE html>
     navWheel.classList.toggle("active", view==="wheel");
     viewMsds.style.display = (view==="msds") ? "block" : "none";
     viewWheel.style.display = (view==="wheel") ? "block" : "none";
+
+    // theme switch
+    document.body.classList.toggle("wheel-theme", view==="wheel");
+
     hideDrawer();
     location.hash = view==="msds" ? "#/msds" : "#/wheel";
   }
@@ -695,7 +808,7 @@ const UI_HTML = `<!DOCTYPE html>
   $("c7").onclick=()=>navigator.clipboard.writeText(s7.textContent||"");
   $("c14").onclick=()=>navigator.clipboard.writeText(s14.textContent||"");
 
-  /* ===== WHEEL (clean, screenshot-like) ===== */
+  /* ===== WHEEL ===== */
   const tail = $("tail");
   const btnWheel = $("btnWheel");
   const stWheel = $("stWheel");
@@ -742,7 +855,7 @@ const UI_HTML = `<!DOCTYPE html>
       <div class="cell">
         <div class="opLine">
           <div class="opItem"><span class="dot"></span><span>\${esc(opName)}</span></div>
-          \${opCountry ? \`<div class="opItem"><span class="dot" style="background: rgba(124,58,237,.35)"></span><span>\${esc(opCountry)}</span></div>\` : ""}
+          \${opCountry ? \`<div class="opItem"><span class="dot" style="background: rgba(167,139,250,.55)"></span><span>\${esc(opCountry)}</span></div>\` : ""}
         </div>
       </div>
 
@@ -817,7 +930,6 @@ const UI_HTML = `<!DOCTYPE html>
       wheelHint.style.display="none";
 
       wheelSummary.textContent = buildWheelSummary(data);
-
       setStatus(stWheel,"Tamamlandı.","ok");
     }catch(e){
       setStatus(stWheel, e.message||"Hata", "err");
@@ -843,9 +955,6 @@ const UI_HTML = `<!DOCTYPE html>
 
 /* =========================
    /api/search (MSDS + MIL-PRF)
-   - MSDS UI değişmedi
-   - Kullanıcı MIL-PRF ile arama yapabilsin diye:
-     sorguda MIL-PRF geçerse PDF aramasını SDS/MSDS'e zorlamıyoruz.
 ========================= */
 async function handleSearch(request, env) {
   try {
@@ -858,9 +967,6 @@ async function handleSearch(request, env) {
     const qUpper = q.toUpperCase();
     const isMilQuery = qUpper.includes("MIL-PRF") || qUpper.includes("MIL PRF") || qUpper.includes("MILPRF");
 
-    // PDF query:
-    // - Normalde MSDS/SDS ağırlıklı
-    // - MIL-PRF odaklı arama yazılırsa SDS/MSDS filtrelemeyelim
     const pdfQuery = isMilQuery
       ? `${q} filetype:pdf`
       : `${q} (MSDS OR SDS OR "Safety Data Sheet") filetype:pdf`;
@@ -884,7 +990,6 @@ async function handleSearch(request, env) {
       .sort((a, b) => Number(b.directPdf) - Number(a.directPdf))
       .slice(0, 10);
 
-    // MIL-PRF codes (web)
     const milQuery = `${q} ("MIL-PRF" OR "MIL PRF" OR MILPRF)`;
     const milResults = await googleCse(env, milQuery, { fileTypePdf: false, num: 5 });
 
@@ -903,9 +1008,8 @@ async function handleSearch(request, env) {
 }
 
 /* =========================
-   /api/wheels (Tail -> CLEAN Wheel/Tire PNs)
-   - Sadece NLG/MLG için Wheel P/N ve Tire P/N döndürür
-   - UI screenshot-like
+   /api/wheels (Tail -> NLG/MLG separate research)
+   - NLG ve MLG ayrı arama + ayrı corpus + ayrı extraction
 ========================= */
 async function handleWheels(request, env) {
   try {
@@ -915,55 +1019,54 @@ async function handleWheels(request, env) {
 
     assertSecrets(env);
 
-    // We search for pages that likely contain wheel/tire PNs for the tail
-    const q1 = `${tail} (NLG OR "nose gear" OR "nose wheel" OR burun) ("wheel p/n" OR "wheel pn" OR "rim p/n" OR "tire p/n" OR "tyre")`;
-    const q2 = `${tail} (MLG OR "main gear" OR "main wheel" OR ana) ("wheel p/n" OR "wheel pn" OR "rim p/n" OR "tire p/n" OR "tyre")`;
-    const q3 = `${tail} wheel tire "wheel p/n" "tire p/n"`;
+    // Separate queries
+    const qNLG = `${tail} (NLG OR "nose landing gear" OR "nose gear" OR "nose wheel" OR burun) ("wheel p/n" OR "wheel pn" OR "rim p/n" OR "rim pn" OR "tire p/n" OR "tyre p/n" OR tyre OR tire)`;
+    const qMLG = `${tail} (MLG OR "main landing gear" OR "main gear" OR "main wheel" OR ana) ("wheel p/n" OR "wheel pn" OR "rim p/n" OR "rim pn" OR "tire p/n" OR "tyre p/n" OR tyre OR tire)`;
 
-    const itemsA = await googleCse(env, q1, { fileTypePdf: false, num: 8 });
-    const itemsB = await googleCse(env, q2, { fileTypePdf: false, num: 8 });
-    const itemsC = await googleCse(env, q3, { fileTypePdf: false, num: 8 });
+    const nlgItems = await googleCse(env, qNLG, { fileTypePdf: false, num: 8 });
+    const mlgItems = await googleCse(env, qMLG, { fileTypePdf: false, num: 8 });
 
-    const merged = dedupeByLink([...(itemsA || []), ...(itemsB || []), ...(itemsC || [])]).slice(0, 10);
+    const corpusN = await buildWheelCorpus(nlgItems || []);
+    const corpusM = await buildWheelCorpus(mlgItems || []);
 
-    // Build a strong text corpus from snippets + a few fetched pages
-    const corpusParts = [];
-    for (const it of merged) {
-      corpusParts.push(`${it.title || ""}\n${it.snippet || ""}`);
+    const nlg = extractWheelSideFromText(corpusN, "NLG");
+    let mlg = extractWheelSideFromText(corpusM, "MLG", {
+      // if the same as NLG, try to avoid returning identical PNs
+      avoidWheelPn: nlg.wheelPn || null,
+      avoidTirePn: nlg.tirePn || null,
+    });
+
+    // Final safety: if STILL identical, try MLG using a merged fallback corpus but forcing MLG anchors
+    if (
+      (nlg.wheelPn && mlg.wheelPn && nlg.wheelPn === mlg.wheelPn) ||
+      (nlg.tirePn && mlg.tirePn && nlg.tirePn === mlg.tirePn)
+    ) {
+      const mergedFallback = (corpusM + "\n\n" + corpusN).slice(0, 250000);
+      mlg = extractWheelSideFromText(mergedFallback, "MLG", {
+        avoidWheelPn: nlg.wheelPn || null,
+        avoidTirePn: nlg.tirePn || null,
+      });
     }
 
-    const toFetch = merged.map((x) => x.link).filter(Boolean).slice(0, 4);
-    for (const link of toFetch) {
-      try {
-        const safe = await assertSafeUrl(link);
-        const html = await fetchHtmlText(safe);
-        const cleaned = stripHtmlToText(html);
-        corpusParts.push(cleaned);
-      } catch {
-        // ignore
-      }
-    }
+    const mergedSources = dedupeByLink([...(nlgItems || []), ...(mlgItems || [])]).slice(0, 10);
 
-    const corpus = corpusParts.join("\n\n");
-    const extracted = extractWheelCardFromText(corpus);
-
-    // Optional: try to detect aircraft model/operator from corpus too
-    const aircraft = detectAircraftInfo(tail, corpus);
-    const operator = detectOperatorInfo(corpus);
+    const corpusForMeta = (corpusN + "\n\n" + corpusM).slice(0, 220000);
+    const aircraft = detectAircraftInfo(tail, corpusForMeta);
+    const operator = detectOperatorInfo(corpusForMeta);
 
     const out = {
       tail,
       aircraft,
       operator,
       nlg: {
-        wheelPn: extracted.nlg.wheelPn || "—",
-        tirePn: extracted.nlg.tirePn || "—",
+        wheelPn: nlg.wheelPn || "—",
+        tirePn: nlg.tirePn || "—",
       },
       mlg: {
-        wheelPn: extracted.mlg.wheelPn || "—",
-        tirePn: extracted.mlg.tirePn || "—",
+        wheelPn: mlg.wheelPn || "—",
+        tirePn: mlg.tirePn || "—",
       },
-      sources: merged.slice(0, 6).map((x) => ({
+      sources: mergedSources.slice(0, 6).map((x) => ({
         title: x.title || "",
         link: x.link || "",
         host: x.displayLink || safeHost(x.link || ""),
@@ -976,67 +1079,94 @@ async function handleWheels(request, env) {
   }
 }
 
-function stripHtmlToText(html) {
-  const s = String(html || "");
-  // remove scripts/styles
-  const noScripts = s.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
-                    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ");
-  const text = noScripts
-    .replace(/<\/(p|div|br|li|tr|td|th|h1|h2|h3|h4|h5|h6)>/gi, "\n")
-    .replace(/<[^>]+>/g, " ");
-  return text.replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
-}
+async function buildWheelCorpus(items) {
+  // Combine snippets + fetch a few pages
+  const merged = dedupeByLink(items).slice(0, 10);
 
-function extractWheelCardFromText(raw) {
-  const text = normalizeForWheel(raw);
+  const parts = [];
+  for (const it of merged) parts.push(`${it.title || ""}\n${it.snippet || ""}`);
 
-  // side anchors
-  const nlgAnchors = ["NLG", "NOSE", "NOSE GEAR", "NOSE WHEEL", "BURUN"];
-  const mlgAnchors = ["MLG", "MAIN", "MAIN GEAR", "MAIN WHEEL", "ANA"];
-
-  const wheelLabel = ["WHEEL P/N", "WHEEL PN", "WHEEL P N", "RIM P/N", "RIM PN", "WHEEL PART NUMBER", "RIM PART NUMBER"];
-  const tireLabel  = ["TIRE P/N", "TIRE PN", "TYRE P/N", "TYRE PN", "TIRE PART NUMBER", "TYRE PART NUMBER", "TIRE SIZE", "TYRE SIZE"];
-
-  const wheelPnRe = /(?:WHEEL|RIM)\s*(?:P\/?N|PN|PART\s*NUMBER)\s*[:#]?\s*([A-Z0-9][A-Z0-9-]{4,})/gi;
-  const tirePnRe  = /(?:TIRE|TYRE)\s*(?:P\/?N|PN|PART\s*NUMBER)\s*[:#]?\s*([A-Z0-9][A-Z0-9-]{4,})/gi;
-
-  // Also accept common tire sizes (H40x14.5-19, 1050x395R16, 1409x530R23, etc.)
-  const tireSizeRe = /\bH?\d{2,4}\s*[xX]\s*\d{2,4}(?:\.\d{1,2})?\s*(?:R?\s*)?-?\s*\d{2}\b/g;
-
-  function bestForSide(anchors) {
-    const anchorHits = findAnchorPositions(text, anchors);
-    const w = pickClosestLabelValue(text, anchorHits, wheelLabel, wheelPnRe);
-    let t = pickClosestLabelValue(text, anchorHits, tireLabel, tirePnRe);
-
-    if (!t) {
-      // If explicit Tire PN not present, pick a size close to anchor
-      const size = pickClosestByRegex(text, anchorHits, tireSizeRe);
-      if (size) t = size;
+  const toFetch = merged.map((x) => x.link).filter(Boolean).slice(0, 4);
+  for (const link of toFetch) {
+    try {
+      const safe = await assertSafeUrl(link);
+      const html = await fetchHtmlText(safe);
+      const cleaned = stripHtmlToText(html);
+      parts.push(cleaned);
+    } catch {
+      // ignore fetch failures
     }
-
-    return { wheelPn: w || null, tirePn: t || null };
   }
 
-  const nlg = bestForSide(nlgAnchors);
-  const mlg = bestForSide(mlgAnchors);
+  return parts.join("\n\n");
+}
 
-  return { nlg, mlg };
+function stripHtmlToText(html) {
+  const s = String(html || "");
+  const noScripts = s
+    .replace(/<script\\b[^<]*(?:(?!<\\/script>)<[^<]*)*<\\/script>/gi, " ")
+    .replace(/<style\\b[^<]*(?:(?!<\\/style>)<[^<]*)*<\\/style>/gi, " ");
+  const text = noScripts
+    .replace(/<\\/(p|div|br|li|tr|td|th|h1|h2|h3|h4|h5|h6)>/gi, "\\n")
+    .replace(/<[^>]+>/g, " ");
+  return text
+    .replace(/\\s+\\n/g, "\\n")
+    .replace(/\\n{3,}/g, "\\n\\n")
+    .replace(/[ \\t]{2,}/g, " ")
+    .trim();
 }
 
 function normalizeForWheel(s) {
   return String(s || "")
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/WHEEL\s*P\s*\/?\s*N/gi, "WHEEL P/N")
-    .replace(/TIRE\s*P\s*\/?\s*N/gi, "TIRE P/N")
-    .replace(/TYRE\s*P\s*\/?\s*N/gi, "TIRE P/N")
+    .replace(/\\r\\n?/g, "\\n")
+    .replace(/[ \\t]+/g, " ")
+    .replace(/\\n{3,}/g, "\\n\\n")
+    .replace(/WHEEL\\s*P\\s*\\/?\\s*N/gi, "WHEEL P/N")
+    .replace(/RIM\\s*P\\s*\\/?\\s*N/gi, "RIM P/N")
+    .replace(/TIRE\\s*P\\s*\\/?\\s*N/gi, "TIRE P/N")
+    .replace(/TYRE\\s*P\\s*\\/?\\s*N/gi, "TIRE P/N")
     .toUpperCase();
 }
 
-function findAnchorPositions(textUpper, anchorsUpper) {
+function extractWheelSideFromText(raw, side, opts = {}) {
+  const text = normalizeForWheel(raw);
+
+  const NLG_ANCHORS = ["NLG", "NOSE", "NOSE GEAR", "NOSE WHEEL", "NOSE LANDING GEAR", "BURUN"];
+  const MLG_ANCHORS = ["MLG", "MAIN", "MAIN GEAR", "MAIN WHEEL", "MAIN LANDING GEAR", "ANA"];
+
+  const anchors = side === "NLG" ? NLG_ANCHORS : MLG_ANCHORS;
+  const anchorPos = findAnchorPositions(text, anchors);
+  const effectiveAnchors = anchorPos.length ? anchorPos : [0];
+
+  // Regex candidates
+  const wheelPnRe = /(?:WHEEL|RIM)\\s*(?:P\\/?N|PN|PART\\s*NUMBER)\\s*[:#]?\\s*([A-Z0-9][A-Z0-9-]{4,})/gi;
+  const tirePnRe  = /(?:TIRE|TYRE)\\s*(?:P\\/?N|PN|PART\\s*NUMBER)\\s*[:#]?\\s*([A-Z0-9][A-Z0-9-]{4,})/gi;
+
+  // Tire size patterns (common aviation formats)
+  const tireSizeRe = /\\b(?:H)?\\d{2,4}\\s*[xX]\\s*\\d{2,4}(?:\\.\\d{1,2})?\\s*(?:R\\s*)?-?\\s*\\d{2}\\b/g;
+
+  const avoidWheelPn = (opts.avoidWheelPn || "").toUpperCase() || null;
+  const avoidTirePn  = (opts.avoidTirePn || "").toUpperCase() || null;
+
+  // We pick best 2 candidates so we can fallback if equal/avoided
+  const wheelCandidates = scoreCandidates(text, effectiveAnchors, wheelPnRe, anchors);
+  const tireCandidates  = scoreCandidates(text, effectiveAnchors, tirePnRe, anchors);
+
+  let wheelPn = pickBestCandidate(wheelCandidates, avoidWheelPn);
+  let tirePn  = pickBestCandidate(tireCandidates, avoidTirePn);
+
+  // If tire PN not found, try size near anchors
+  if (!tirePn) {
+    const sizeCandidates = scoreRegexCandidates(text, effectiveAnchors, tireSizeRe, anchors);
+    tirePn = pickBestCandidate(sizeCandidates, avoidTirePn);
+  }
+
+  return { wheelPn: wheelPn || null, tirePn: tirePn || null };
+}
+
+function findAnchorPositions(textUpper, anchors) {
   const positions = [];
-  for (const a of anchorsUpper) {
+  for (const a of anchors) {
     const aU = a.toUpperCase();
     let idx = 0;
     while (true) {
@@ -1047,68 +1177,84 @@ function findAnchorPositions(textUpper, anchorsUpper) {
     }
   }
   positions.sort((a, b) => a - b);
-  return positions.slice(0, 20);
+  return positions.slice(0, 30);
 }
 
-function pickClosestLabelValue(textUpper, anchorPositions, labels, valueRegex) {
+function scoreCandidates(textUpper, anchorPositions, valueRegex, anchors) {
   const hits = [];
-
-  // Find all valueRegex matches in the whole text with position
-  let m;
   const re = new RegExp(valueRegex.source, valueRegex.flags);
+  let m;
   while ((m = re.exec(textUpper)) !== null) {
     const val = (m[1] || "").trim();
-    if (!val) continue;
-
-    // small sanity
-    if (val.length < 5) continue;
-
+    if (!val || val.length < 5) continue;
     hits.push({ idx: m.index, val });
   }
+  if (!hits.length) return [];
 
-  if (hits.length === 0) return null;
+  const anchorSet = anchors.map(a => a.toUpperCase());
 
-  // Score by:
-  //  - closeness to anchor positions
-  //  - also if the nearby window contains one of the labels
-  let best = null;
-
-  for (const h of hits) {
+  // Score by distance + label proximity + side anchor proximity window
+  return hits.map(h => {
     const dist = minAbsDistance(h.idx, anchorPositions);
-    const winStart = Math.max(0, h.idx - 140);
-    const winEnd = Math.min(textUpper.length, h.idx + 140);
+    const winStart = Math.max(0, h.idx - 250);
+    const winEnd = Math.min(textUpper.length, h.idx + 250);
     const win = textUpper.slice(winStart, winEnd);
 
-    let labelBoost = 0;
-    for (const lab of labels) {
-      if (win.includes(lab.toUpperCase())) { labelBoost = 250; break; }
+    // If window includes a side anchor, boost
+    let sideBoost = 0;
+    for (const a of anchorSet) {
+      if (win.includes(a)) { sideBoost = 260; break; }
     }
 
-    const score = (labelBoost) - dist; // higher is better
-    if (!best || score > best.score) best = { score, val: h.val };
-  }
+    // If value occurs in a tight area after label, boost
+    let labelBoost = 0;
+    if (win.includes("WHEEL P/N") || win.includes("RIM P/N") || win.includes("TIRE P/N")) labelBoost = 160;
 
-  return best ? best.val : null;
+    // Prefer values that are not too close to the beginning of page noise
+    const positionPenalty = h.idx < 40 ? 80 : 0;
+
+    const score = (sideBoost + labelBoost) - dist - positionPenalty;
+    return { ...h, score };
+  }).sort((a,b)=> b.score - a.score);
 }
 
-function pickClosestByRegex(textUpper, anchorPositions, regex) {
+function scoreRegexCandidates(textUpper, anchorPositions, regex, anchors) {
   const hits = [];
   const re = new RegExp(regex.source, regex.flags);
   let m;
   while ((m = re.exec(textUpper)) !== null) {
-    const val = (m[0] || "").replace(/\s+/g, "");
+    const val = (m[0] || "").replace(/\\s+/g, "");
     if (!val) continue;
     hits.push({ idx: m.index, val });
   }
-  if (!hits.length) return null;
+  if (!hits.length) return [];
 
-  let best = null;
-  for (const h of hits) {
+  const anchorSet = anchors.map(a => a.toUpperCase());
+
+  return hits.map(h => {
     const dist = minAbsDistance(h.idx, anchorPositions);
-    const score = -dist;
-    if (!best || score > best.score) best = { score, val: h.val };
+    const winStart = Math.max(0, h.idx - 250);
+    const winEnd = Math.min(textUpper.length, h.idx + 250);
+    const win = textUpper.slice(winStart, winEnd);
+
+    let sideBoost = 0;
+    for (const a of anchorSet) {
+      if (win.includes(a)) { sideBoost = 220; break; }
+    }
+    const score = sideBoost - dist;
+    return { ...h, score };
+  }).sort((a,b)=> b.score - a.score);
+}
+
+function pickBestCandidate(candidates, avoidUpper) {
+  if (!candidates || !candidates.length) return null;
+  for (const c of candidates.slice(0, 10)) {
+    const v = String(c.val || "").toUpperCase();
+    if (!v) continue;
+    if (avoidUpper && v === avoidUpper) continue;
+    return c.val;
   }
-  return best ? best.val : null;
+  return null;
 }
 
 function minAbsDistance(x, positions) {
@@ -1123,17 +1269,15 @@ function minAbsDistance(x, positions) {
 
 function detectAircraftInfo(tail, corpusRaw) {
   const text = String(corpusRaw || "");
-
-  // Aircraft model pattern
-  const m1 = text.match(/\bBoeing\s+7\d{2}(?:-\d{3})?\b/i)
-        || text.match(/\bAirbus\s+A\d{3}(?:-\d{3})?\b/i)
-        || text.match(/\bA\d{3}(?:-\d{3})?\b/i)
-        || text.match(/\bB\d{3}(?:-\d{3})?\b/i);
+  const m1 = text.match(/\\bBoeing\\s+7\\d{2}(?:-\\d{3})?\\b/i)
+        || text.match(/\\bAirbus\\s+A\\d{3}(?:-\\d{3})?\\b/i)
+        || text.match(/\\bA\\d{3}(?:-\\d{3})?\\b/i)
+        || text.match(/\\bB\\d{3}(?:-\\d{3})?\\b/i);
 
   const model = m1 ? normalizeModel(m1[0]) : null;
 
   const typeCode = (() => {
-    const m = text.match(/\b737NG\b/i) || text.match(/\bA330\b/i) || text.match(/\bA320\b/i) || text.match(/\bA321\b/i);
+    const m = text.match(/\\b737NG\\b/i) || text.match(/\\bA330\\b/i) || text.match(/\\bA320\\b/i) || text.match(/\\bA321\\b/i);
     return m ? m[0].toUpperCase() : null;
   })();
 
@@ -1145,26 +1289,18 @@ function detectAircraftInfo(tail, corpusRaw) {
   })();
 
   const family = model ? (model.startsWith("BOEING") ? "BOEING" : (model.startsWith("AIRBUS") ? "AIRBUS" : null)) : null;
-
-  return {
-    model: model || null,
-    family,
-    typeCode,
-    bodyType,
-  };
+  return { model: model || null, family, typeCode, bodyType };
 }
 
 function normalizeModel(s) {
   const x = String(s || "").trim();
-  if (/^A\d{3}/i.test(x)) return "Airbus " + x.toUpperCase();
-  if (/^B\d{3}/i.test(x)) return x.toUpperCase();
-  return x.replace(/\s+/g, " ").replace(/^\w/, (c)=>c.toUpperCase());
+  if (/^A\\d{3}/i.test(x)) return "Airbus " + x.toUpperCase();
+  if (/^B\\d{3}/i.test(x)) return x.toUpperCase();
+  return x.replace(/\\s+/g, " ").replace(/^\\w/, (c)=>c.toUpperCase());
 }
 
 function detectOperatorInfo(corpusRaw) {
   const u = String(corpusRaw || "").toUpperCase();
-
-  // Minimal & safe extraction: try to catch common patterns without hallucinating
   let name = null;
   if (u.includes("TURKISH AIRLINES") || u.includes("TÜRK HAVA YOLLARI") || u.includes("THY")) name = "Turkish Airlines";
   else if (u.includes("PEGASUS")) name = "Pegasus";
@@ -1178,7 +1314,7 @@ function detectOperatorInfo(corpusRaw) {
 }
 
 /* =========================
-   PDF Extract (/api/extract)  (unchanged logic)
+   PDF Extract (/api/extract)
 ========================= */
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const MAX_PDF_BYTES = 22 * 1024 * 1024;
@@ -1218,7 +1354,7 @@ async function handleExtract(request) {
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i);
       const pageText = await extractPageTextWithLines(page);
-      fullText += pageText + "\n";
+      fullText += pageText + "\\n";
     }
 
     const { section7, section14 } = parseSections(fullText);
@@ -1258,10 +1394,7 @@ async function extractPageTextWithLines(page) {
 
     let yKey = null;
     for (const k of groups.keys()) {
-      if (Math.abs(k - y) <= tol) {
-        yKey = k;
-        break;
-      }
+      if (Math.abs(k - y) <= tol) { yKey = k; break; }
     }
     if (yKey === null) yKey = y;
 
@@ -1275,8 +1408,8 @@ async function extractPageTextWithLines(page) {
   }
 
   const ys = Array.from(groups.keys()).sort((a, b) => b - a);
-
   const lines = [];
+
   for (const y of ys) {
     const items = groups.get(y).sort((a, b) => a.x - b.x);
 
@@ -1296,8 +1429,8 @@ async function extractPageTextWithLines(page) {
 
       const needsSpace =
         gap > 2.5 &&
-        !/^[,.;:)\]]/.test(token) &&
-        !/[([/]\s*$/.test(line);
+        !/^[,.;:)\\]]/.test(token) &&
+        !/[([/]\\s*$/.test(line);
 
       line += (needsSpace ? " " : "") + token;
       lastEnd = it.w != null ? it.x + it.w : it.x + token.length * 3;
@@ -1307,11 +1440,11 @@ async function extractPageTextWithLines(page) {
     lines.push(line.trimEnd());
   }
 
-  return lines.join("\n").trim();
+  return lines.join("\\n").trim();
 }
 
 function deSpaceLettersInLine(line) {
-  const tokens = line.split(/\s+/);
+  const tokens = line.split(/\\s+/);
   const out = [];
   let i = 0;
 
@@ -1319,13 +1452,9 @@ function deSpaceLettersInLine(line) {
 
   while (i < tokens.length) {
     if (isLetter(tokens[i])) {
-      let j = i;
-      let seq = "";
-      let count = 0;
+      let j = i, seq = "", count = 0;
       while (j < tokens.length && isLetter(tokens[j])) {
-        seq += tokens[j];
-        count++;
-        j++;
+        seq += tokens[j]; count++; j++;
       }
       if (count >= 4) out.push(seq);
       else for (let k = i; k < j; k++) out.push(tokens[k]);
@@ -1343,12 +1472,10 @@ function resolvePdfUrl(url) {
   try {
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
-
-    // Google Drive "file/d/<id>" -> uc download
     if (host.includes("drive.google.com")) {
-      const m = u.pathname.match(/\/file\/d\/([^/]+)\//);
+      const m = u.pathname.match(/\\/file\\/d\\/([^/]+)\\//);
       if (m && m[1]) {
-        return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(m[1])}`;
+        return \`https://drive.google.com/uc?export=download&id=\${encodeURIComponent(m[1])}\`;
       }
     }
     return url;
@@ -1366,13 +1493,13 @@ async function fetchPdfAsUint8(url) {
       signal: ctrl.signal,
       redirect: "follow",
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/2.1)",
+        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/2.2)",
         Accept: "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
       },
     });
 
-    if (!resp.ok) throw new Error(`PDF indirilemedi (HTTP ${resp.status}).`);
+    if (!resp.ok) throw new Error(\`PDF indirilemedi (HTTP \${resp.status}).\`);
 
     const len = Number(resp.headers.get("content-length") || "0");
     if (len && len > MAX_PDF_BYTES) throw new Error("PDF çok büyük (content-length).");
@@ -1384,8 +1511,8 @@ async function fetchPdfAsUint8(url) {
 
     if (!startsWithPdfHeader(u8)) {
       const headTxt = new TextDecoder("latin1").decode(u8.slice(0, Math.min(u8.length, 512)));
-      const snippet = headTxt.replace(/\s+/g, " ").slice(0, 220);
-      throw new Error(`Bu link PDF döndürmüyor (başlık %PDF- ile başlamıyor). İlk içerik: "${snippet}".`);
+      const snippet = headTxt.replace(/\\s+/g, " ").slice(0, 220);
+      throw new Error(\`Bu link PDF döndürmüyor (başlık %PDF- ile başlamıyor). İlk içerik: "\${snippet}".\`);
     }
     if (!hasPdfEof(u8)) {
       throw new Error("PDF doğrulama başarısız: %%EOF bulunamadı. PDF viewer/HTML döndürüyor olabilir.");
@@ -1417,19 +1544,19 @@ function hasPdfEof(u8) {
 }
 
 /* =========================
-   Section extraction (MSDS)  (unchanged)
+   Section extraction (MSDS)
 ========================= */
 function normalizeText(text) {
   let t = String(text || "");
-  t = t.replace(/\r\n?/g, "\n");
-  t = t.replace(/[ \t]+/g, " ");
-  t = t.replace(/\n{3,}/g, "\n\n");
+  t = t.replace(/\\r\\n?/g, "\\n");
+  t = t.replace(/[ \\t]+/g, " ");
+  t = t.replace(/\\n{3,}/g, "\\n\\n");
 
-  t = t.replace(/S\s+E\s+C\s+T\s+I\s+O\s+N/gi, "SECTION");
-  t = t.replace(/H\s+A\s+N\s+D\s+L\s+I\s+N\s+G/gi, "Handling");
-  t = t.replace(/S\s+T\s+O\s+R\s+A\s+G\s+E/gi, "Storage");
-  t = t.replace(/T\s+R\s+A\s+N\s+S\s+P\s+O\s+R\s+T/gi, "Transport");
-  t = t.replace(/S\s+H\s+I\s+P\s+P\s+I\s+N\s+G/gi, "Shipping");
+  t = t.replace(/S\\s+E\\s+C\\s+T\\s+I\\s+O\\s+N/gi, "SECTION");
+  t = t.replace(/H\\s+A\\s+N\\s+D\\s+L\\s+I\\s+N\\s+G/gi, "Handling");
+  t = t.replace(/S\\s+T\\s+O\\s+R\\s+A\\s+G\\s+E/gi, "Storage");
+  t = t.replace(/T\\s+R\\s+A\\s+N\\s+S\\s+P\\s+O\\s+R\\s+T/gi, "Transport");
+  t = t.replace(/S\\s+H\\s+I\\s+P\\s+P\\s+I\\s+N\\s+G/gi, "Shipping");
 
   return t.trim();
 }
@@ -1439,7 +1566,7 @@ function parseSections(rawText) {
   const upper = text.toUpperCase();
 
   const headingRe =
-    /(^|\n)\s*(?:SECTION|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]?\s*([^\n]{0,220})/gim;
+    /(^|\\n)\\s*(?:SECTION|BÖLÜM|BOLUM|CHAPTER)?\\s*(\\d{1,2})\\s*[:.)-]?\\s*([^\\n]{0,220})/gim;
 
   const headings = [];
   let m;
@@ -1485,8 +1612,8 @@ function parseSections(rawText) {
   if (!section14) section14 = sliceByKeywords(upper, text, ["UN NUMBER", "ADR", "IMDG", "IATA", "ICAO"], ["SECTION 15", "REGULATORY INFORMATION", "SECTION 16", "OTHER INFORMATION"]);
 
   return {
-    section7: section7 || "Handling and storage (Section 7) bulunamadı. (Belge görüntü/tablo ağırlıklı olabilir.)",
-    section14: section14 || "Transport information (Section 14) bulunamadı. (Belge görüntü/tablo ağırlıklı olabilir.)",
+    section7: section7 || "Handling and storage bulunamadı. (Belge görüntü/tablo ağırlıklı olabilir.)",
+    section14: section14 || "Transport information bulunamadı. (Belge görüntü/tablo ağırlıklı olabilir.)",
   };
 }
 
@@ -1510,7 +1637,7 @@ function sliceByKeywords(upperAll, textAll, startKeys, stopKeys) {
 }
 
 function cleanSection(section) {
-  const lines = section.split("\n").map((l) => l.trimEnd());
+  const lines = section.split("\\n").map((l) => l.trimEnd());
 
   const filtered = [];
   for (const line0 of lines) {
@@ -1535,13 +1662,13 @@ function cleanSection(section) {
     return true;
   });
 
-  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return out.join("\\n").replace(/\\n{3,}/g, "\\n\\n").trim();
 }
 
 function looksLikeHeaderFooter(line) {
-  const hasPage = /\/\s*\d+\s*$/.test(line) || /\b\d+\s*\/\s*\d+\b/.test(line);
-  const hasMsds = /MSDS/i.test(line) || /(M\s*S\s*D\s*S)/i.test(line);
-  const tokens = line.split(/\s+/).filter(Boolean);
+  const hasPage = /\\/\\s*\\d+\\s*$/.test(line) || /\\b\\d+\\s*\\/\\s*\\d+\\b/.test(line);
+  const hasMsds = /MSDS/i.test(line) || /(M\\s*S\\s*D\\s*S)/i.test(line);
+  const tokens = line.split(/\\s+/).filter(Boolean);
   if (!tokens.length) return false;
   const singleLetters = tokens.filter((t) => /^[A-Za-z]$/.test(t)).length;
   const ratio = singleLetters / tokens.length;
@@ -1550,13 +1677,13 @@ function looksLikeHeaderFooter(line) {
 
 function finalizeForDisplay(t) {
   let s = String(t || "");
-  s = s.replace(/\r\n?/g, "\n");
-  s = s.replace(/[ \t]+/g, " ");
-  s = s.replace(/([A-Za-z])-\n([A-Za-z])/g, "$1$2");
-  s = s.replace(/\s*:\s*/g, ": ");
-  s = s.replace(/\s*;\s*/g, "; ");
-  s = s.replace(/\s*,\s*/g, ", ");
-  s = s.replace(/\n{3,}/g, "\n\n").trim();
+  s = s.replace(/\\r\\n?/g, "\\n");
+  s = s.replace(/[ \\t]+/g, " ");
+  s = s.replace(/([A-Za-z])-\\n([A-Za-z])/g, "$1$2");
+  s = s.replace(/\\s*:\\s*/g, ": ");
+  s = s.replace(/\\s*;\\s*/g, "; ");
+  s = s.replace(/\\s*,\\s*/g, ", ");
+  s = s.replace(/\\n{3,}/g, "\\n\\n").trim();
   return s;
 }
 
@@ -1615,7 +1742,7 @@ async function extractMilPrfByFetchingPages(links) {
 
 function extractMilPrfCodes(upperText) {
   const out = new Set();
-  const re = /\bMIL\s*[- ]?\s*PRF\s*[- ]?\s*([0-9]{3,6}[A-Z0-9/-]{0,12})\b/g;
+  const re = /\\bMIL\\s*[- ]?\\s*PRF\\s*[- ]?\\s*([0-9]{3,6}[A-Z0-9/-]{0,12})\\b/g;
   let m;
   while ((m = re.exec(upperText)) !== null) {
     const code = `MIL-PRF-${m[1]}`.replace(/--+/g, "-");
@@ -1652,7 +1779,7 @@ async function fetchHtmlText(url) {
       signal: ctrl.signal,
       redirect: "follow",
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; Depot-Tools/2.1)",
+        "User-Agent": "Mozilla/5.0 (compatible; Depot-Tools/2.2)",
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
     });
@@ -1677,7 +1804,7 @@ async function assertSafeUrl(raw) {
   const host = u.hostname.toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost")) throw new Error("Güvenlik: localhost engellendi.");
 
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+  if (/^\\d{1,3}(\\.\\d{1,3}){3}$/.test(host)) {
     const [a, b] = host.split(".").map((n) => parseInt(n, 10));
     const isPrivate =
       a === 127 ||
