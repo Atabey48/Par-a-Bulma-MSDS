@@ -6,7 +6,7 @@
 // - GET  /api/health            : health
 // - GET  /api/search?q=         : MSDS PDF list + MIL-PRF codes (web)
 // - POST /api/extract           : { pdfUrl } -> extract Section 7/14 (server-side PDF parse)
-// - GET  /api/wheels?tail=      : tail number -> Google web scan -> wheel/tire candidates (nose/main)
+// - GET  /api/wheels?tail=      : tail number -> Google web scan -> NLG/MLG wheel/tire PNs (clean)
 //
 // Required Worker secrets:
 // - GOOGLE_API_KEY
@@ -32,7 +32,7 @@ export default {
       if (request.method === "OPTIONS") {
         return new Response(null, { status: 204, headers: corsHeaders() });
       }
-      return withCors(handleExtract(request, env));
+      return withCors(handleExtract(request));
     }
 
     if (url.pathname === "/api/wheels") {
@@ -259,34 +259,123 @@ const UI_HTML = `<!DOCTYPE html>
       user-select:none;
     }
 
-    .twoCols{
-      display:grid; grid-template-columns: 1fr 1fr; gap: 10px;
-    }
-    @media(max-width:980px){ .twoCols{grid-template-columns:1fr;} }
-
-    .candList{
-      margin-top:10px;
-      display:grid; gap:10px;
-    }
-    .candCard{
+    /* WHEEL VIEW (screenshot-like) */
+    .wheelTable{
+      margin-top: 12px;
       border: 1px solid rgba(20,70,110,0.14);
-      border-radius: 14px;
-      padding: 12px;
-      background: rgba(255,253,248,.72);
+      border-radius: 16px;
+      overflow: hidden;
+      background: rgba(255,253,248,.65);
     }
-    .candCard h4{margin:0 0 8px; font-size: 13.5px}
-    .chips{display:flex; flex-wrap:wrap; gap:8px}
-    .chip{
-      display:inline-flex; align-items:center;
-      padding: 6px 10px; border-radius: 999px;
+    .wheelHeader, .wheelRow{
+      display:grid;
+      grid-template-columns: 1.05fr 0.9fr 0.85fr 0.85fr;
+      gap: 0;
+      align-items: stretch;
+    }
+    .wheelHeader{
+      background: rgba(126,200,227,0.10);
+      border-bottom: 1px solid rgba(20,70,110,0.12);
+    }
+    .wheelHeader .cell{
+      padding: 12px 12px;
+      font-weight: 950;
+      font-size: 13px;
+      letter-spacing: .2px;
+    }
+    .wheelHeader .cell.nlg{color:#2a6fd6}
+    .wheelHeader .cell.mlg{color:#7c3aed}
+
+    .wheelRow .cell{
+      padding: 14px 12px;
+      border-bottom: 1px solid rgba(20,70,110,0.10);
+      background: rgba(255,253,248,.70);
+    }
+    .wheelRow:last-child .cell{border-bottom:none}
+
+    .airTitle{
+      font-weight: 950;
+      font-size: 18px;
+      margin: 0 0 6px;
+    }
+    .airSub{
+      margin: 0;
+      color: rgba(22,50,79,.75);
+      font-weight: 800;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    .tag{
+      display:inline-flex;
+      margin-top: 8px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(20,70,110,0.14);
+      background: rgba(126,200,227,0.08);
+      font-weight: 900;
+      font-size: 12px;
+      color: rgba(22,50,79,.84);
+    }
+
+    .opLine{
+      display:flex;
+      flex-direction:column;
+      gap: 8px;
+      font-size: 13px;
+      color: rgba(22,50,79,.86);
+      font-weight: 800;
+    }
+    .opItem{display:flex; gap:8px; align-items:center}
+    .dot{
+      width: 8px; height: 8px; border-radius: 999px;
+      background: rgba(74,168,216,.55);
+      border: 1px solid rgba(20,70,110,0.10);
+      flex: 0 0 auto;
+    }
+
+    .pnBox{
+      display:flex;
+      flex-direction:column;
+      gap: 12px;
+      height: 100%;
+    }
+    .pnGroup{
+      display:flex;
+      flex-direction:column;
+      gap: 6px;
+    }
+    .pnLabel{
+      font-size: 12px;
+      font-weight: 950;
+      letter-spacing: .2px;
+      color: rgba(22,50,79,.62);
+    }
+    .pnValue{
+      display:inline-flex;
+      align-items:center;
+      width: fit-content;
+      padding: 10px 12px;
+      border-radius: 12px;
       border: 1px solid rgba(20,70,110,0.14);
       background: #fffdfa;
-      font-weight: 900;
-      font-size: 12.5px;
-      color: rgba(22,50,79,.90);
+      font-weight: 950;
+      font-size: 14px;
+      color: rgba(22,50,79,.92);
     }
-    .chip a{color: inherit; text-decoration: none}
-    .chip a:hover{text-decoration: underline}
+    .pnValue.mlg{border-color: rgba(124,58,237,.18)}
+    .pnValue.nlg{border-color: rgba(42,111,214,.18)}
+
+    @media(max-width:980px){
+      .wheelHeader, .wheelRow{
+        grid-template-columns: 1fr;
+      }
+      .wheelHeader .cell{display:none;}
+      .wheelRow .cell{border-bottom: none;}
+      .wheelRow{
+        border-bottom: 1px solid rgba(20,70,110,0.12);
+      }
+      .wheelRow:last-child{border-bottom:none;}
+    }
   </style>
 </head>
 <body>
@@ -319,7 +408,7 @@ const UI_HTML = `<!DOCTYPE html>
       </button>
       <button class="menuBtn" id="navWheel">
         Wheel
-        <small>Kuyruk no → Nose/Main wheel + tire candidates</small>
+        <small>Tail → NLG/MLG Wheel P/N + Tire P/N</small>
       </button>
     </div>
 
@@ -329,7 +418,7 @@ const UI_HTML = `<!DOCTYPE html>
   </aside>
 
   <div class="wrap">
-    <!-- VIEW: MSDS -->
+    <!-- VIEW: MSDS (UI DEĞİŞTİRİLMEDİ) -->
     <div id="viewMsds">
       <div class="grid">
         <section class="card">
@@ -344,7 +433,7 @@ const UI_HTML = `<!DOCTYPE html>
           </div>
 
           <div class="row">
-            <input id="q" type="text" placeholder="Örn: RTV 102 MSDS" />
+            <input id="q" type="text" placeholder="Örn: RTV 102 MSDS veya MIL-PRF-81733" />
             <button id="btn">Ara</button>
           </div>
 
@@ -392,34 +481,33 @@ const UI_HTML = `<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- VIEW: WHEEL -->
+    <!-- VIEW: WHEEL (GÖRSELDEKİ GİBİ) -->
     <div id="viewWheel" style="display:none;">
       <div class="grid">
         <section class="card">
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-            <div style="font-weight:950; font-size:16px;">Wheel Search</div>
-            <span class="badge">Tail No → Google</span>
-            <span class="badge">Nose/Main candidates</span>
+            <div style="font-weight:950; font-size:16px;">Wheel</div>
+            <span class="badge">Tail No → Result</span>
           </div>
 
           <div class="row">
-            <input id="tail" type="text" placeholder="Örn: TC-ABC / N123AB / SU-BQN" />
+            <input id="tail" type="text" placeholder="Örn: TC-JHK / SU-BQN / N123AB" />
             <button id="btnWheel">Ara</button>
           </div>
           <div id="stWheel" class="status"></div>
 
-          <div class="hint">
-            Bu ekran Google sonuçlarından “aday” çıkarır (jant P/N, lastik size/brand). Sonuçların yanında kaynak link bulunur.
+          <div class="wheelTable" id="wheelTable" style="display:none;">
+            <div class="wheelHeader">
+              <div class="cell">UÇAK BİLGİSİ</div>
+              <div class="cell">OPERATÖR</div>
+              <div class="cell nlg">NLG (BURUN)</div>
+              <div class="cell mlg">MLG (ANA)</div>
+            </div>
+            <div id="wheelRows"></div>
           </div>
 
-          <div class="kv">
-            <div class="k">Top Sources</div>
-            <div class="v" id="wheelSources">—</div>
-          </div>
-
-          <div class="twoCols">
-            <div class="candList" id="noseBox"></div>
-            <div class="candList" id="mainBox"></div>
+          <div class="hint" id="wheelHint">
+            Sadece jant ve lastik bilgileri gösterilir: NLG/MLG için Wheel P/N ve Tire P/N.
           </div>
         </section>
 
@@ -607,95 +695,105 @@ const UI_HTML = `<!DOCTYPE html>
   $("c7").onclick=()=>navigator.clipboard.writeText(s7.textContent||"");
   $("c14").onclick=()=>navigator.clipboard.writeText(s14.textContent||"");
 
-  /* ===== WHEEL ===== */
+  /* ===== WHEEL (clean, screenshot-like) ===== */
   const tail = $("tail");
   const btnWheel = $("btnWheel");
   const stWheel = $("stWheel");
-  const noseBox = $("noseBox");
-  const mainBox = $("mainBox");
-  const wheelSources = $("wheelSources");
+  const wheelTable = $("wheelTable");
+  const wheelRows = $("wheelRows");
   const wheelSummary = $("wheelSummary");
   const copyWheel = $("copyWheel");
+  const wheelHint = $("wheelHint");
 
   function clearWheel(){
-    noseBox.innerHTML="";
-    mainBox.innerHTML="";
-    wheelSources.textContent="—";
+    wheelRows.innerHTML="";
+    wheelTable.style.display="none";
+    wheelHint.style.display="block";
     wheelSummary.textContent="Arama yapınca özet burada oluşur.";
   }
 
-  function makeChip(text, link){
-    const s = document.createElement("span");
-    s.className="chip";
-    if(link){
-      const a=document.createElement("a");
-      a.href=link; a.target="_blank"; a.rel="noopener noreferrer";
-      a.textContent=text;
-      s.appendChild(a);
-    }else{
-      s.textContent=text;
-    }
-    return s;
+  function esc(s){ return String(s??"").replace(/[&<>"']/g, (c)=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+
+  function makeWheelRow(d){
+    const tail = d.tail || "—";
+    const model = d.aircraft?.model || d.aircraft?.family || "—";
+    const typeCode = d.aircraft?.typeCode ? '"' + d.aircraft.typeCode + '"' : "";
+    const bodyTag = d.aircraft?.bodyType ? d.aircraft.bodyType : "";
+
+    const opName = d.operator?.name || "—";
+    const opCountry = d.operator?.country || "";
+
+    const nlgWheel = d.nlg?.wheelPn || "—";
+    const nlgTire  = d.nlg?.tirePn  || "—";
+    const mlgWheel = d.mlg?.wheelPn || "—";
+    const mlgTire  = d.mlg?.tirePn  || "—";
+
+    const row = document.createElement("div");
+    row.className = "wheelRow";
+
+    row.innerHTML = \`
+      <div class="cell">
+        <div class="airTitle">\${esc(tail)}</div>
+        <p class="airSub">\${esc(model)}</p>
+        \${typeCode ? \`<p class="airSub" style="margin-top:4px;">\${esc(typeCode)}</p>\` : ""}
+        \${bodyTag ? \`<span class="tag">\${esc(bodyTag)}</span>\` : ""}
+      </div>
+
+      <div class="cell">
+        <div class="opLine">
+          <div class="opItem"><span class="dot"></span><span>\${esc(opName)}</span></div>
+          \${opCountry ? \`<div class="opItem"><span class="dot" style="background: rgba(124,58,237,.35)"></span><span>\${esc(opCountry)}</span></div>\` : ""}
+        </div>
+      </div>
+
+      <div class="cell">
+        <div class="pnBox">
+          <div class="pnGroup">
+            <div class="pnLabel">WHEEL P/N</div>
+            <div class="pnValue nlg">\${esc(nlgWheel)}</div>
+          </div>
+          <div class="pnGroup">
+            <div class="pnLabel">TIRE P/N</div>
+            <div class="pnValue nlg">\${esc(nlgTire)}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="cell">
+        <div class="pnBox">
+          <div class="pnGroup">
+            <div class="pnLabel">WHEEL P/N</div>
+            <div class="pnValue mlg">\${esc(mlgWheel)}</div>
+          </div>
+          <div class="pnGroup">
+            <div class="pnLabel">TIRE P/N</div>
+            <div class="pnValue mlg">\${esc(mlgTire)}</div>
+          </div>
+        </div>
+      </div>
+    \`;
+
+    return row;
   }
 
-  function renderCandidates(container, title, rims, tires){
-    container.innerHTML="";
-    const card=document.createElement("div");
-    card.className="candCard";
-    card.innerHTML = "<h4></h4>";
-    card.querySelector("h4").textContent = title;
-
-    const sub1=document.createElement("div");
-    sub1.className="hint";
-    sub1.style.marginTop="6px";
-    sub1.textContent="Wheel / Rim P/N (candidates)";
-
-    const chips1=document.createElement("div");
-    chips1.className="chips";
-    if(!rims.length) chips1.appendChild(makeChip("Not found"));
-    else rims.slice(0,12).forEach(x=>chips1.appendChild(makeChip(x.value, x.source)));
-
-    const sub2=document.createElement("div");
-    sub2.className="hint";
-    sub2.style.marginTop="10px";
-    sub2.textContent="Tire (size / brand) (candidates)";
-
-    const chips2=document.createElement("div");
-    chips2.className="chips";
-    if(!tires.length) chips2.appendChild(makeChip("Not found"));
-    else tires.slice(0,14).forEach(x=>chips2.appendChild(makeChip(x.value, x.source)));
-
-    card.appendChild(sub1);
-    card.appendChild(chips1);
-    card.appendChild(sub2);
-    card.appendChild(chips2);
-
-    container.appendChild(card);
-  }
-
-  function buildSummary(tailNo, data){
-    function uniq(arr){ return Array.from(new Set(arr.map(x=>x.value))); }
-
-    const nR = uniq(data.nose?.rims||[]);
-    const nT = uniq(data.nose?.tires||[]);
-    const mR = uniq(data.main?.rims||[]);
-    const mT = uniq(data.main?.tires||[]);
-
+  function buildWheelSummary(d){
     const lines=[];
-    lines.push("TAIL: " + tailNo);
+    lines.push("TAIL: " + (d.tail||"—"));
+    if (d.aircraft?.model) lines.push("AIRCRAFT: " + d.aircraft.model);
+    if (d.operator?.name) lines.push("OPERATOR: " + d.operator.name + (d.operator?.country ? " ("+d.operator.country+")" : ""));
     lines.push("");
-    lines.push("NOSE:");
-    lines.push("  Rim P/N: " + (nR.length? nR.join(", ") : "Not found"));
-    lines.push("  Tire: " + (nT.length? nT.join(", ") : "Not found"));
+    lines.push("NLG (NOSE):");
+    lines.push("  WHEEL P/N: " + (d.nlg?.wheelPn || "—"));
+    lines.push("  TIRE  P/N: " + (d.nlg?.tirePn || "—"));
     lines.push("");
-    lines.push("MAIN:");
-    lines.push("  Rim P/N: " + (mR.length? mR.join(", ") : "Not found"));
-    lines.push("  Tire: " + (mT.length? mT.join(", ") : "Not found"));
+    lines.push("MLG (MAIN):");
+    lines.push("  WHEEL P/N: " + (d.mlg?.wheelPn || "—"));
+    lines.push("  TIRE  P/N: " + (d.mlg?.tirePn || "—"));
 
-    if(data.sources && data.sources.length){
+    if (d.sources && d.sources.length) {
       lines.push("");
       lines.push("SOURCES:");
-      data.sources.slice(0,6).forEach(s=>lines.push("  - " + s.link));
+      d.sources.slice(0,5).forEach(s=>lines.push("  - " + (s.link||"")));
     }
     return lines.join("\\n");
   }
@@ -706,24 +804,24 @@ const UI_HTML = `<!DOCTYPE html>
 
     btnWheel.disabled=true;
     clearWheel();
-    setStatus(stWheel,"Aranıyor... (Google web scan)","ok");
+    setStatus(stWheel,"Aranıyor...","ok");
 
     try{
       const r = await fetch(apiUrl("/api/wheels?tail="+encodeURIComponent(t)));
       const data = await safeJson(r);
       if(!r.ok) throw new Error(data.error || "Wheel search başarısız.");
 
-      const srcs = (data.sources||[]).slice(0,5).map(s=>s.host||s.link).join(" • ");
-      wheelSources.textContent = srcs || "—";
+      wheelRows.innerHTML="";
+      wheelRows.appendChild(makeWheelRow(data));
+      wheelTable.style.display="block";
+      wheelHint.style.display="none";
 
-      renderCandidates(noseBox, "NOSE (Burun) Wheel/Tire", data.nose?.rims||[], data.nose?.tires||[]);
-      renderCandidates(mainBox, "MAIN (Ana) Wheel/Tire", data.main?.rims||[], data.main?.tires||[]);
+      wheelSummary.textContent = buildWheelSummary(data);
 
-      wheelSummary.textContent = buildSummary(t, data);
-
-      setStatus(stWheel,"Tamamlandı. (Sonuçlar kaynaklara göre aday listesi olarak verilir)","ok");
+      setStatus(stWheel,"Tamamlandı.","ok");
     }catch(e){
       setStatus(stWheel, e.message||"Hata", "err");
+      clearWheel();
     }finally{
       btnWheel.disabled=false;
     }
@@ -731,6 +829,7 @@ const UI_HTML = `<!DOCTYPE html>
 
   btnWheel.onclick=searchWheel;
   tail.addEventListener("keydown",(e)=>{ if(e.key==="Enter") searchWheel(); });
+
   copyWheel.onclick= async ()=>{
     try{ await navigator.clipboard.writeText(wheelSummary.textContent||""); setStatus(stWheel,"Panoya kopyalandı.","ok"); }
     catch{ setStatus(stWheel,"Kopyalama başarısız.","err"); }
@@ -744,6 +843,9 @@ const UI_HTML = `<!DOCTYPE html>
 
 /* =========================
    /api/search (MSDS + MIL-PRF)
+   - MSDS UI değişmedi
+   - Kullanıcı MIL-PRF ile arama yapabilsin diye:
+     sorguda MIL-PRF geçerse PDF aramasını SDS/MSDS'e zorlamıyoruz.
 ========================= */
 async function handleSearch(request, env) {
   try {
@@ -753,7 +855,16 @@ async function handleSearch(request, env) {
 
     assertSecrets(env);
 
-    const pdfQuery = `${q} (MSDS OR SDS OR "Safety Data Sheet") filetype:pdf`;
+    const qUpper = q.toUpperCase();
+    const isMilQuery = qUpper.includes("MIL-PRF") || qUpper.includes("MIL PRF") || qUpper.includes("MILPRF");
+
+    // PDF query:
+    // - Normalde MSDS/SDS ağırlıklı
+    // - MIL-PRF odaklı arama yazılırsa SDS/MSDS filtrelemeyelim
+    const pdfQuery = isMilQuery
+      ? `${q} filetype:pdf`
+      : `${q} (MSDS OR SDS OR "Safety Data Sheet") filetype:pdf`;
+
     const pdfItems = await googleCse(env, pdfQuery, { fileTypePdf: true, num: 10 });
 
     const items = (pdfItems || [])
@@ -773,6 +884,7 @@ async function handleSearch(request, env) {
       .sort((a, b) => Number(b.directPdf) - Number(a.directPdf))
       .slice(0, 10);
 
+    // MIL-PRF codes (web)
     const milQuery = `${q} ("MIL-PRF" OR "MIL PRF" OR MILPRF)`;
     const milResults = await googleCse(env, milQuery, { fileTypePdf: false, num: 5 });
 
@@ -791,7 +903,9 @@ async function handleSearch(request, env) {
 }
 
 /* =========================
-   /api/wheels (Tail -> Wheel/Tire)
+   /api/wheels (Tail -> CLEAN Wheel/Tire PNs)
+   - Sadece NLG/MLG için Wheel P/N ve Tire P/N döndürür
+   - UI screenshot-like
 ========================= */
 async function handleWheels(request, env) {
   try {
@@ -801,26 +915,21 @@ async function handleWheels(request, env) {
 
     assertSecrets(env);
 
-    const q1 = `${tail} (nose wheel OR NLG wheel OR main wheel OR MLG wheel) (tire OR tyre OR wheel OR rim) (part number OR P/N OR PN)`;
-    const q2 = `${tail} landing gear wheel tire size`;
-    const q3 = `${tail} wheel assembly part number tire`;
+    // We search for pages that likely contain wheel/tire PNs for the tail
+    const q1 = `${tail} (NLG OR "nose gear" OR "nose wheel" OR burun) ("wheel p/n" OR "wheel pn" OR "rim p/n" OR "tire p/n" OR "tyre")`;
+    const q2 = `${tail} (MLG OR "main gear" OR "main wheel" OR ana) ("wheel p/n" OR "wheel pn" OR "rim p/n" OR "tire p/n" OR "tyre")`;
+    const q3 = `${tail} wheel tire "wheel p/n" "tire p/n"`;
 
-    const itemsA = await googleCse(env, q1, { fileTypePdf: false, num: 10 });
+    const itemsA = await googleCse(env, q1, { fileTypePdf: false, num: 8 });
     const itemsB = await googleCse(env, q2, { fileTypePdf: false, num: 8 });
     const itemsC = await googleCse(env, q3, { fileTypePdf: false, num: 8 });
 
-    const merged = dedupeByLink([...(itemsA || []), ...(itemsB || []), ...(itemsC || [])]).slice(0, 12);
+    const merged = dedupeByLink([...(itemsA || []), ...(itemsB || []), ...(itemsC || [])]).slice(0, 10);
 
-    const nose = { rims: [], tires: [] };
-    const main = { rims: [], tires: [] };
-
+    // Build a strong text corpus from snippets + a few fetched pages
+    const corpusParts = [];
     for (const it of merged) {
-      const link = it.link;
-      if (!link) continue;
-
-      const ctx = `${it.title || ""} ${it.snippet || ""}`;
-      const extracted = extractWheelInfoFromText(ctx);
-      pushCandidates(nose, main, extracted, link);
+      corpusParts.push(`${it.title || ""}\n${it.snippet || ""}`);
     }
 
     const toFetch = merged.map((x) => x.link).filter(Boolean).slice(0, 4);
@@ -828,24 +937,33 @@ async function handleWheels(request, env) {
       try {
         const safe = await assertSafeUrl(link);
         const html = await fetchHtmlText(safe);
-        const extracted = extractWheelInfoFromText(html);
-        pushCandidates(nose, main, extracted, link);
+        const cleaned = stripHtmlToText(html);
+        corpusParts.push(cleaned);
       } catch {
         // ignore
       }
     }
 
+    const corpus = corpusParts.join("\n\n");
+    const extracted = extractWheelCardFromText(corpus);
+
+    // Optional: try to detect aircraft model/operator from corpus too
+    const aircraft = detectAircraftInfo(tail, corpus);
+    const operator = detectOperatorInfo(corpus);
+
     const out = {
       tail,
-      nose: {
-        rims: dedupeCand(nose.rims).slice(0, 24),
-        tires: dedupeCand(nose.tires).slice(0, 30),
+      aircraft,
+      operator,
+      nlg: {
+        wheelPn: extracted.nlg.wheelPn || "—",
+        tirePn: extracted.nlg.tirePn || "—",
       },
-      main: {
-        rims: dedupeCand(main.rims).slice(0, 24),
-        tires: dedupeCand(main.tires).slice(0, 30),
+      mlg: {
+        wheelPn: extracted.mlg.wheelPn || "—",
+        tirePn: extracted.mlg.tirePn || "—",
       },
-      sources: merged.slice(0, 8).map((x) => ({
+      sources: merged.slice(0, 6).map((x) => ({
         title: x.title || "",
         link: x.link || "",
         host: x.displayLink || safeHost(x.link || ""),
@@ -858,118 +976,209 @@ async function handleWheels(request, env) {
   }
 }
 
-function pushCandidates(nose, main, extracted, sourceLink) {
-  for (const c of extracted) {
-    const side = c.side; // "nose" | "main" | "unknown"
-    const kind = c.kind; // "rim" | "tire"
-    const value = c.value;
-
-    const entry = { value, source: sourceLink };
-
-    if (side === "nose") {
-      if (kind === "rim") nose.rims.push(entry);
-      if (kind === "tire") nose.tires.push(entry);
-      continue;
-    }
-
-    if (side === "main") {
-      if (kind === "rim") main.rims.push(entry);
-      if (kind === "tire") main.tires.push(entry);
-      continue;
-    }
-
-    // unknown side: conservative duplication
-    if (kind === "rim") {
-      nose.rims.push(entry);
-      main.rims.push(entry);
-    }
-    if (kind === "tire") {
-      nose.tires.push(entry);
-      main.tires.push(entry);
-    }
-  }
+function stripHtmlToText(html) {
+  const s = String(html || "");
+  // remove scripts/styles
+  const noScripts = s.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
+                    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ");
+  const text = noScripts
+    .replace(/<\/(p|div|br|li|tr|td|th|h1|h2|h3|h4|h5|h6)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ");
+  return text.replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
 }
 
-function extractWheelInfoFromText(raw) {
-  const text = String(raw || "").replace(/\s+/g, " ");
-  const upper = text.toUpperCase();
+function extractWheelCardFromText(raw) {
+  const text = normalizeForWheel(raw);
 
-  const hasNose = /\b(NOSE|NLG|FORWARD\s+GEAR|NOSE\s+GEAR)\b/i.test(text);
-  const hasMain = /\b(MAIN|MLG|LEFT\s+MAIN|RIGHT\s+MAIN|MAIN\s+GEAR)\b/i.test(text);
+  // side anchors
+  const nlgAnchors = ["NLG", "NOSE", "NOSE GEAR", "NOSE WHEEL", "BURUN"];
+  const mlgAnchors = ["MLG", "MAIN", "MAIN GEAR", "MAIN WHEEL", "ANA"];
 
-  const sideFromContext = () => {
-    if (hasNose && !hasMain) return "nose";
-    if (hasMain && !hasNose) return "main";
-    if (hasNose && hasMain) return "unknown";
-    return "unknown";
+  const wheelLabel = ["WHEEL P/N", "WHEEL PN", "WHEEL P N", "RIM P/N", "RIM PN", "WHEEL PART NUMBER", "RIM PART NUMBER"];
+  const tireLabel  = ["TIRE P/N", "TIRE PN", "TYRE P/N", "TYRE PN", "TIRE PART NUMBER", "TYRE PART NUMBER", "TIRE SIZE", "TYRE SIZE"];
+
+  const wheelPnRe = /(?:WHEEL|RIM)\s*(?:P\/?N|PN|PART\s*NUMBER)\s*[:#]?\s*([A-Z0-9][A-Z0-9-]{4,})/gi;
+  const tirePnRe  = /(?:TIRE|TYRE)\s*(?:P\/?N|PN|PART\s*NUMBER)\s*[:#]?\s*([A-Z0-9][A-Z0-9-]{4,})/gi;
+
+  // Also accept common tire sizes (H40x14.5-19, 1050x395R16, 1409x530R23, etc.)
+  const tireSizeRe = /\bH?\d{2,4}\s*[xX]\s*\d{2,4}(?:\.\d{1,2})?\s*(?:R?\s*)?-?\s*\d{2}\b/g;
+
+  function bestForSide(anchors) {
+    const anchorHits = findAnchorPositions(text, anchors);
+    const w = pickClosestLabelValue(text, anchorHits, wheelLabel, wheelPnRe);
+    let t = pickClosestLabelValue(text, anchorHits, tireLabel, tirePnRe);
+
+    if (!t) {
+      // If explicit Tire PN not present, pick a size close to anchor
+      const size = pickClosestByRegex(text, anchorHits, tireSizeRe);
+      if (size) t = size;
+    }
+
+    return { wheelPn: w || null, tirePn: t || null };
+  }
+
+  const nlg = bestForSide(nlgAnchors);
+  const mlg = bestForSide(mlgAnchors);
+
+  return { nlg, mlg };
+}
+
+function normalizeForWheel(s) {
+  return String(s || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/WHEEL\s*P\s*\/?\s*N/gi, "WHEEL P/N")
+    .replace(/TIRE\s*P\s*\/?\s*N/gi, "TIRE P/N")
+    .replace(/TYRE\s*P\s*\/?\s*N/gi, "TIRE P/N")
+    .toUpperCase();
+}
+
+function findAnchorPositions(textUpper, anchorsUpper) {
+  const positions = [];
+  for (const a of anchorsUpper) {
+    const aU = a.toUpperCase();
+    let idx = 0;
+    while (true) {
+      const j = textUpper.indexOf(aU, idx);
+      if (j === -1) break;
+      positions.push(j);
+      idx = j + aU.length;
+    }
+  }
+  positions.sort((a, b) => a - b);
+  return positions.slice(0, 20);
+}
+
+function pickClosestLabelValue(textUpper, anchorPositions, labels, valueRegex) {
+  const hits = [];
+
+  // Find all valueRegex matches in the whole text with position
+  let m;
+  const re = new RegExp(valueRegex.source, valueRegex.flags);
+  while ((m = re.exec(textUpper)) !== null) {
+    const val = (m[1] || "").trim();
+    if (!val) continue;
+
+    // small sanity
+    if (val.length < 5) continue;
+
+    hits.push({ idx: m.index, val });
+  }
+
+  if (hits.length === 0) return null;
+
+  // Score by:
+  //  - closeness to anchor positions
+  //  - also if the nearby window contains one of the labels
+  let best = null;
+
+  for (const h of hits) {
+    const dist = minAbsDistance(h.idx, anchorPositions);
+    const winStart = Math.max(0, h.idx - 140);
+    const winEnd = Math.min(textUpper.length, h.idx + 140);
+    const win = textUpper.slice(winStart, winEnd);
+
+    let labelBoost = 0;
+    for (const lab of labels) {
+      if (win.includes(lab.toUpperCase())) { labelBoost = 250; break; }
+    }
+
+    const score = (labelBoost) - dist; // higher is better
+    if (!best || score > best.score) best = { score, val: h.val };
+  }
+
+  return best ? best.val : null;
+}
+
+function pickClosestByRegex(textUpper, anchorPositions, regex) {
+  const hits = [];
+  const re = new RegExp(regex.source, regex.flags);
+  let m;
+  while ((m = re.exec(textUpper)) !== null) {
+    const val = (m[0] || "").replace(/\s+/g, "");
+    if (!val) continue;
+    hits.push({ idx: m.index, val });
+  }
+  if (!hits.length) return null;
+
+  let best = null;
+  for (const h of hits) {
+    const dist = minAbsDistance(h.idx, anchorPositions);
+    const score = -dist;
+    if (!best || score > best.score) best = { score, val: h.val };
+  }
+  return best ? best.val : null;
+}
+
+function minAbsDistance(x, positions) {
+  if (!positions || !positions.length) return 999999;
+  let best = 999999;
+  for (const p of positions) {
+    const d = Math.abs(x - p);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+function detectAircraftInfo(tail, corpusRaw) {
+  const text = String(corpusRaw || "");
+
+  // Aircraft model pattern
+  const m1 = text.match(/\bBoeing\s+7\d{2}(?:-\d{3})?\b/i)
+        || text.match(/\bAirbus\s+A\d{3}(?:-\d{3})?\b/i)
+        || text.match(/\bA\d{3}(?:-\d{3})?\b/i)
+        || text.match(/\bB\d{3}(?:-\d{3})?\b/i);
+
+  const model = m1 ? normalizeModel(m1[0]) : null;
+
+  const typeCode = (() => {
+    const m = text.match(/\b737NG\b/i) || text.match(/\bA330\b/i) || text.match(/\bA320\b/i) || text.match(/\bA321\b/i);
+    return m ? m[0].toUpperCase() : null;
+  })();
+
+  const bodyType = (() => {
+    const u = text.toUpperCase();
+    if (u.includes("WIDE BODY") || u.includes("WIDEBODY")) return "WIDE BODY";
+    if (u.includes("NARROW BODY") || u.includes("NARROWBODY")) return "NARROW BODY";
+    return null;
+  })();
+
+  const family = model ? (model.startsWith("BOEING") ? "BOEING" : (model.startsWith("AIRBUS") ? "AIRBUS" : null)) : null;
+
+  return {
+    model: model || null,
+    family,
+    typeCode,
+    bodyType,
   };
-
-  const pnReList = [
-    /\b\d{5,7}-\d{1,4}\b/g,
-    /\b\d{3,5}-\d{3,5}-\d{1,4}\b/g,
-    /\b[A-Z]{1,4}\d{3,7}-\d{1,4}\b/g,
-    /\b\d{4,7}\b/g, // fallback (filtered)
-  ];
-
-  const sizeReList = [
-    /\b\d{2,3}\s*[Xx]\s*\d{1,2}(?:\.\d{1,2})?\s*-\s*\d{1,2}\b/g,
-    /\bH?\d{2,3}\s*[Xx]\s*\d{1,2}(?:\.\d{1,2})?\s*-\s*\d{1,2}\b/g,
-  ];
-
-  const brands = ["MICHELIN", "GOODYEAR", "BRIDGESTONE", "DUNLOP", "CONTINENTAL", "PIRELLI", "STA"];
-  const brandHits = brands.filter((b) => upper.includes(b));
-
-  const out = [];
-
-  const rimCtx = /\b(WHEEL|RIM|HUB|ASSY|ASSEMBLY|JANT)\b/i.test(text);
-  const tireCtx = /\b(TIRE|TYRE|LASTIK|TUBELESS|PLY|PR)\b/i.test(text);
-
-  for (const re of sizeReList) {
-    const m = text.match(re) || [];
-    for (const v0 of m) {
-      const v = v0.replace(/\s+/g, "").replace(/x/i, "x").replace(/-+/g, "-");
-      out.push({ kind: "tire", side: sideFromContext(), value: v });
-    }
-  }
-
-  for (const b of brandHits) {
-    out.push({ kind: "tire", side: sideFromContext(), value: b });
-  }
-
-  const pnCandidates = new Set();
-  for (const re of pnReList) {
-    let mm;
-    const rr = new RegExp(re.source, re.flags);
-    while ((mm = rr.exec(upper)) !== null) pnCandidates.add(mm[0]);
-  }
-
-  const filteredPN = Array.from(pnCandidates).filter((pn) => {
-    if (/^\d{4}$/.test(pn)) return false;
-    if (/^\d{5}$/.test(pn) && !rimCtx) return false;
-    if (pn.length < 6) return false;
-    return true;
-  });
-
-  for (const pn of filteredPN) {
-    const kind = tireCtx && !rimCtx ? "tire" : "rim";
-    out.push({ kind, side: sideFromContext(), value: pn });
-  }
-
-  return out;
 }
 
-function dedupeCand(arr) {
-  const map = new Map();
-  for (const x of arr || []) {
-    const k = (x.value || "").trim().toUpperCase();
-    if (!k) continue;
-    if (!map.has(k)) map.set(k, x);
-  }
-  return Array.from(map.values());
+function normalizeModel(s) {
+  const x = String(s || "").trim();
+  if (/^A\d{3}/i.test(x)) return "Airbus " + x.toUpperCase();
+  if (/^B\d{3}/i.test(x)) return x.toUpperCase();
+  return x.replace(/\s+/g, " ").replace(/^\w/, (c)=>c.toUpperCase());
+}
+
+function detectOperatorInfo(corpusRaw) {
+  const u = String(corpusRaw || "").toUpperCase();
+
+  // Minimal & safe extraction: try to catch common patterns without hallucinating
+  let name = null;
+  if (u.includes("TURKISH AIRLINES") || u.includes("TÜRK HAVA YOLLARI") || u.includes("THY")) name = "Turkish Airlines";
+  else if (u.includes("PEGASUS")) name = "Pegasus";
+  else if (u.includes("SUNEXPRESS")) name = "SunExpress";
+
+  let country = null;
+  if (u.includes("TURKEY")) country = "Turkey";
+  else if (u.includes("TÜRKIYE") || u.includes("TURKIYE")) country = "Turkey";
+
+  return { name, country };
 }
 
 /* =========================
-   PDF Extract (/api/extract)
+   PDF Extract (/api/extract)  (unchanged logic)
 ========================= */
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const MAX_PDF_BYTES = 22 * 1024 * 1024;
@@ -1157,7 +1366,7 @@ async function fetchPdfAsUint8(url) {
       signal: ctrl.signal,
       redirect: "follow",
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/2.0)",
+        "User-Agent": "Mozilla/5.0 (compatible; MSDS-Extractor/2.1)",
         Accept: "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
       },
@@ -1208,7 +1417,7 @@ function hasPdfEof(u8) {
 }
 
 /* =========================
-   Section extraction (MSDS)
+   Section extraction (MSDS)  (unchanged)
 ========================= */
 function normalizeText(text) {
   let t = String(text || "");
@@ -1216,7 +1425,6 @@ function normalizeText(text) {
   t = t.replace(/[ \t]+/g, " ");
   t = t.replace(/\n{3,}/g, "\n\n");
 
-  // De-space common headings caused by PDFs like "T R A N S P O R T"
   t = t.replace(/S\s+E\s+C\s+T\s+I\s+O\s+N/gi, "SECTION");
   t = t.replace(/H\s+A\s+N\s+D\s+L\s+I\s+N\s+G/gi, "Handling");
   t = t.replace(/S\s+T\s+O\s+R\s+A\s+G\s+E/gi, "Storage");
@@ -1444,7 +1652,7 @@ async function fetchHtmlText(url) {
       signal: ctrl.signal,
       redirect: "follow",
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; Depot-Tools/2.0)",
+        "User-Agent": "Mozilla/5.0 (compatible; Depot-Tools/2.1)",
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
     });
