@@ -1,5 +1,5 @@
 // src/worker.js
-// Cloudflare Workers (Module Worker) + single-page UI embedded
+// Cloudflare Workers (Module Worker) + Single-HTML UI embedded
 //
 // Routes:
 // - GET  /                     : UI
@@ -8,12 +8,9 @@
 // - POST /api/extract           : { pdfUrl } -> extract Section 7/14 (server-side PDF parse)
 // - GET  /api/wheels?tail=      : tail number -> Google web scan -> wheel/tire candidates (nose/main)
 //
-// Required secrets (Worker):
+// Required Worker secrets:
 // - GOOGLE_API_KEY
 // - GOOGLE_CX
-//
-// If you host UI on GitHub Pages (not recommended), set API_BASE in UI to your Worker URL.
-// Otherwise just open Worker root URL and it will work without API_BASE changes.
 
 import { getDocument } from "pdfjs-serverless";
 
@@ -32,7 +29,9 @@ export default {
     }
 
     if (url.pathname === "/api/extract") {
-      if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders() });
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders() });
+      }
       return withCors(handleExtract(request, env));
     }
 
@@ -494,7 +493,6 @@ const UI_HTML = `<!DOCTYPE html>
   navMsds.onclick = ()=>setActive("msds");
   navWheel.onclick = ()=>setActive("wheel");
 
-  // initial route
   (function initRoute(){
     const h = location.hash || "#/msds";
     if(h.includes("wheel")) setActive("wheel"); else setActive("msds");
@@ -604,15 +602,10 @@ const UI_HTML = `<!DOCTYPE html>
     }
   }
 
-  async function copyText(t){
-    try{ await navigator.clipboard.writeText(t||""); setStatus(st,"Panoya kopyalandı.","ok"); }
-    catch{ setStatus(st,"Kopyalama başarısız.","err"); }
-  }
-
   btn.onclick=searchMsds;
   q.addEventListener("keydown",(e)=>{ if(e.key==="Enter") searchMsds(); });
-  $("c7").onclick=()=>copyText(s7.textContent);
-  $("c14").onclick=()=>copyText(s14.textContent);
+  $("c7").onclick=()=>navigator.clipboard.writeText(s7.textContent||"");
+  $("c14").onclick=()=>navigator.clipboard.writeText(s14.textContent||"");
 
   /* ===== WHEEL ===== */
   const tail = $("tail");
@@ -743,7 +736,7 @@ const UI_HTML = `<!DOCTYPE html>
     catch{ setStatus(stWheel,"Kopyalama başarısız.","err"); }
   };
 
-  // default active
+  // default
   navMsds.classList.add("active");
 </script>
 </body>
@@ -808,19 +801,16 @@ async function handleWheels(request, env) {
 
     assertSecrets(env);
 
-    // One strong query + a couple of variants (we also fetch top pages)
     const q1 = `${tail} (nose wheel OR NLG wheel OR main wheel OR MLG wheel) (tire OR tyre OR wheel OR rim) (part number OR P/N OR PN)`;
     const q2 = `${tail} landing gear wheel tire size`;
     const q3 = `${tail} wheel assembly part number tire`;
 
-    // Use CSE: combine by running multiple queries and merging unique results.
     const itemsA = await googleCse(env, q1, { fileTypePdf: false, num: 10 });
     const itemsB = await googleCse(env, q2, { fileTypePdf: false, num: 8 });
     const itemsC = await googleCse(env, q3, { fileTypePdf: false, num: 8 });
 
     const merged = dedupeByLink([...(itemsA || []), ...(itemsB || []), ...(itemsC || [])]).slice(0, 12);
 
-    // Extract candidates from snippet/title first
     const nose = { rims: [], tires: [] };
     const main = { rims: [], tires: [] };
 
@@ -829,14 +819,8 @@ async function handleWheels(request, env) {
       if (!link) continue;
 
       const ctx = `${it.title || ""} ${it.snippet || ""}`;
-      const host = it.displayLink || safeHost(link);
-
       const extracted = extractWheelInfoFromText(ctx);
-
       pushCandidates(nose, main, extracted, link);
-
-      // Optional: fetch top N pages to improve hit rate
-      // (keep modest to avoid timeouts)
     }
 
     const toFetch = merged.map((x) => x.link).filter(Boolean).slice(0, 4);
@@ -845,14 +829,12 @@ async function handleWheels(request, env) {
         const safe = await assertSafeUrl(link);
         const html = await fetchHtmlText(safe);
         const extracted = extractWheelInfoFromText(html);
-
         pushCandidates(nose, main, extracted, link);
       } catch {
-        // ignore per-link failures
+        // ignore
       }
     }
 
-    // Final cleanup: dedupe, limit
     const out = {
       tail,
       nose: {
@@ -896,8 +878,7 @@ function pushCandidates(nose, main, extracted, sourceLink) {
       continue;
     }
 
-    // unknown side: place into both as weak candidates? better: keep conservative.
-    // We'll do conservative: if "rim" and "tire" appear but side unknown, push to both but dedupe will reduce noise.
+    // unknown side: conservative duplication
     if (kind === "rim") {
       nose.rims.push(entry);
       main.rims.push(entry);
@@ -913,44 +894,36 @@ function extractWheelInfoFromText(raw) {
   const text = String(raw || "").replace(/\s+/g, " ");
   const upper = text.toUpperCase();
 
-  // Side detection signals
-  const hasNose = /\b(NOSEO|NOSE|NLG|FORWARD\s+GEAR|NOSE\s+GEAR)\b/i.test(text);
+  const hasNose = /\b(NOSE|NLG|FORWARD\s+GEAR|NOSE\s+GEAR)\b/i.test(text);
   const hasMain = /\b(MAIN|MLG|LEFT\s+MAIN|RIGHT\s+MAIN|MAIN\s+GEAR)\b/i.test(text);
 
   const sideFromContext = () => {
     if (hasNose && !hasMain) return "nose";
     if (hasMain && !hasNose) return "main";
-    if (hasNose && hasMain) return "unknown"; // mixed
+    if (hasNose && hasMain) return "unknown";
     return "unknown";
   };
 
-  // Part number patterns (broad but filtered a bit)
-  // Common patterns: 123456-7, 200001-02-1, A12345-1, 3147-2209-13, etc.
   const pnReList = [
-    /\b\d{5,7}-\d{1,4}\b/g,                 // 123456-7
-    /\b\d{3,5}-\d{3,5}-\d{1,4}\b/g,         // 3147-2209-13
-    /\b[A-Z]{1,4}\d{3,7}-\d{1,4}\b/g,       // A12345-1
-    /\b\d{4,7}\b/g,                          // fallback (filtered later)
+    /\b\d{5,7}-\d{1,4}\b/g,
+    /\b\d{3,5}-\d{3,5}-\d{1,4}\b/g,
+    /\b[A-Z]{1,4}\d{3,7}-\d{1,4}\b/g,
+    /\b\d{4,7}\b/g, // fallback (filtered)
   ];
 
-  // Tire size patterns: 27X7.75-15, 22x6.6-10, 30 x 8.8 - 15, H40x14.5-19, etc.
   const sizeReList = [
-    /\b\d{2,3}\s*[Xx]\s*\d{1,2}(?:\.\d{1,2})?\s*-\s*\d{1,2}\b/g,       // 27x7.75-15
-    /\bH?\d{2,3}\s*[Xx]\s*\d{1,2}(?:\.\d{1,2})?\s*-\s*\d{1,2}\b/g,     // H40x14.5-19
+    /\b\d{2,3}\s*[Xx]\s*\d{1,2}(?:\.\d{1,2})?\s*-\s*\d{1,2}\b/g,
+    /\bH?\d{2,3}\s*[Xx]\s*\d{1,2}(?:\.\d{1,2})?\s*-\s*\d{1,2}\b/g,
   ];
 
-  // Brand signals
-  const brands = ["MICHELIN", "GOODYEAR", "BRIDGESTONE", "DUNLOP", "CONTINENTAL", "PIRELLI", "STA", "SPECIALTY TIRES"];
+  const brands = ["MICHELIN", "GOODYEAR", "BRIDGESTONE", "DUNLOP", "CONTINENTAL", "PIRELLI", "STA"];
   const brandHits = brands.filter((b) => upper.includes(b));
 
   const out = [];
 
-  // Heuristic: If nearby contains WHEEL/RIM/ASSY -> treat PNs as rim candidates.
-  // If nearby contains TIRE/TYRE -> treat size/brand as tire candidates.
   const rimCtx = /\b(WHEEL|RIM|HUB|ASSY|ASSEMBLY|JANT)\b/i.test(text);
   const tireCtx = /\b(TIRE|TYRE|LASTIK|TUBELESS|PLY|PR)\b/i.test(text);
 
-  // Extract sizes (tire)
   for (const re of sizeReList) {
     const m = text.match(re) || [];
     for (const v0 of m) {
@@ -959,38 +932,29 @@ function extractWheelInfoFromText(raw) {
     }
   }
 
-  // Extract brands (tire)
   for (const b of brandHits) {
     out.push({ kind: "tire", side: sideFromContext(), value: b });
   }
 
-  // Extract PNs
   const pnCandidates = new Set();
   for (const re of pnReList) {
     let mm;
-    const rr = new RegExp(re.source, re.flags); // ensure fresh iterator
-    while ((mm = rr.exec(upper)) !== null) {
-      pnCandidates.add(mm[0]);
-    }
+    const rr = new RegExp(re.source, re.flags);
+    while ((mm = rr.exec(upper)) !== null) pnCandidates.add(mm[0]);
   }
 
-  // Filter PNs to reduce noise (avoid pure years, small numbers, etc.)
   const filteredPN = Array.from(pnCandidates).filter((pn) => {
-    if (/^\d{4}$/.test(pn)) return false; // likely year
-    if (/^\d{5}$/.test(pn) && !rimCtx) return false; // too generic unless rim context
+    if (/^\d{4}$/.test(pn)) return false;
+    if (/^\d{5}$/.test(pn) && !rimCtx) return false;
     if (pn.length < 6) return false;
     return true;
   });
 
   for (const pn of filteredPN) {
-    // Determine if this PN is more likely rim or tire:
-    // If explicit tire context exists, still many PNs can be tire-related. But user wants rim P/N primarily.
-    // We'll map PN -> rim by default, unless strong tire-only context.
     const kind = tireCtx && !rimCtx ? "tire" : "rim";
     out.push({ kind, side: sideFromContext(), value: pn });
   }
 
-  // If we have tire context but no size, still let some descriptive strings exist? Keep minimal.
   return out;
 }
 
@@ -1011,7 +975,7 @@ const CACHE_TTL_MS = 15 * 60 * 1000;
 const MAX_PDF_BYTES = 22 * 1024 * 1024;
 const extractCache = new Map();
 
-async function handleExtract(request, env) {
+async function handleExtract(request) {
   try {
     if (request.method !== "POST") return json({ error: "POST gerekli." }, 405);
 
@@ -1034,7 +998,7 @@ async function handleExtract(request, env) {
       const msg = String(e?.message || e);
       if (msg.toLowerCase().includes("invalid pdf structure")) {
         throw new Error(
-          "Invalid PDF structure: Seçilen link gerçek PDF olmayabilir (viewer/HTML sayfası döndürüyor olabilir) veya PDF bozuk olabilir. " +
+          "Invalid PDF structure: Seçilen link gerçek PDF olmayabilir (viewer/HTML döndürüyor olabilir) veya PDF bozuk olabilir. " +
           "Arama listesindeki 'direct' etiketli PDF’leri tercih edin."
         );
       }
@@ -1134,11 +1098,11 @@ async function extractPageTextWithLines(page) {
     lines.push(line.trimEnd());
   }
 
-  return lines.join("\\n").trim();
+  return lines.join("\n").trim();
 }
 
 function deSpaceLettersInLine(line) {
-  const tokens = line.split(/\\s+/);
+  const tokens = line.split(/\s+/);
   const out = [];
   let i = 0;
 
@@ -1171,10 +1135,11 @@ function resolvePdfUrl(url) {
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
 
+    // Google Drive "file/d/<id>" -> uc download
     if (host.includes("drive.google.com")) {
-      const m = u.pathname.match(/\\/file\\/d\\/([^/]+)\\//);
+      const m = u.pathname.match(/\/file\/d\/([^/]+)\//);
       if (m && m[1]) {
-        return \`https://drive.google.com/uc?export=download&id=\${encodeURIComponent(m[1])}\`;
+        return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(m[1])}`;
       }
     }
     return url;
@@ -1198,7 +1163,7 @@ async function fetchPdfAsUint8(url) {
       },
     });
 
-    if (!resp.ok) throw new Error(\`PDF indirilemedi (HTTP \${resp.status}).\`);
+    if (!resp.ok) throw new Error(`PDF indirilemedi (HTTP ${resp.status}).`);
 
     const len = Number(resp.headers.get("content-length") || "0");
     if (len && len > MAX_PDF_BYTES) throw new Error("PDF çok büyük (content-length).");
@@ -1210,8 +1175,8 @@ async function fetchPdfAsUint8(url) {
 
     if (!startsWithPdfHeader(u8)) {
       const headTxt = new TextDecoder("latin1").decode(u8.slice(0, Math.min(u8.length, 512)));
-      const snippet = headTxt.replace(/\\s+/g, " ").slice(0, 220);
-      throw new Error(\`Bu link PDF döndürmüyor (başlık %PDF- ile başlamıyor). İlk içerik: "\${snippet}".\`);
+      const snippet = headTxt.replace(/\s+/g, " ").slice(0, 220);
+      throw new Error(`Bu link PDF döndürmüyor (başlık %PDF- ile başlamıyor). İlk içerik: "${snippet}".`);
     }
     if (!hasPdfEof(u8)) {
       throw new Error("PDF doğrulama başarısız: %%EOF bulunamadı. PDF viewer/HTML döndürüyor olabilir.");
@@ -1247,15 +1212,16 @@ function hasPdfEof(u8) {
 ========================= */
 function normalizeText(text) {
   let t = String(text || "");
-  t = t.replace(/\\r\\n?/g, "\\n");
-  t = t.replace(/[ \\t]+/g, " ");
-  t = t.replace(/\\n{3,}/g, "\\n\\n");
+  t = t.replace(/\r\n?/g, "\n");
+  t = t.replace(/[ \t]+/g, " ");
+  t = t.replace(/\n{3,}/g, "\n\n");
 
-  t = t.replace(/S\\s+E\\s+C\\s+T\\s+I\\s+O\\s+N/gi, "SECTION");
-  t = t.replace(/H\\s+A\\s+N\\s+D\\s+L\\s+I\\s+N\\s+G/gi, "Handling");
-  t = t.replace(/S\\s+T\\s+O\\s+R\\s+A\\s+G\\s+E/gi, "Storage");
-  t = t.replace(/T\\s+R\\s+A\\s+N\\s+S\\s+P\\s+O\\s+R\\s+T/gi, "Transport");
-  t = t.replace(/S\\s+H\\s+I\\s+P\\s+P\\s+I\\s+N\\s+G/gi, "Shipping");
+  // De-space common headings caused by PDFs like "T R A N S P O R T"
+  t = t.replace(/S\s+E\s+C\s+T\s+I\s+O\s+N/gi, "SECTION");
+  t = t.replace(/H\s+A\s+N\s+D\s+L\s+I\s+N\s+G/gi, "Handling");
+  t = t.replace(/S\s+T\s+O\s+R\s+A\s+G\s+E/gi, "Storage");
+  t = t.replace(/T\s+R\s+A\s+N\s+S\s+P\s+O\s+R\s+T/gi, "Transport");
+  t = t.replace(/S\s+H\s+I\s+P\s+P\s+I\s+N\s+G/gi, "Shipping");
 
   return t.trim();
 }
@@ -1265,7 +1231,7 @@ function parseSections(rawText) {
   const upper = text.toUpperCase();
 
   const headingRe =
-    /(^|\\n)\\s*(?:SECTION|BÖLÜM|BOLUM|CHAPTER)?\\s*(\\d{1,2})\\s*[:.)-]?\\s*([^\\n]{0,220})/gim;
+    /(^|\n)\s*(?:SECTION|BÖLÜM|BOLUM|CHAPTER)?\s*(\d{1,2})\s*[:.)-]?\s*([^\n]{0,220})/gim;
 
   const headings = [];
   let m;
@@ -1336,7 +1302,7 @@ function sliceByKeywords(upperAll, textAll, startKeys, stopKeys) {
 }
 
 function cleanSection(section) {
-  const lines = section.split("\\n").map((l) => l.trimEnd());
+  const lines = section.split("\n").map((l) => l.trimEnd());
 
   const filtered = [];
   for (const line0 of lines) {
@@ -1361,13 +1327,13 @@ function cleanSection(section) {
     return true;
   });
 
-  return out.join("\\n").replace(/\\n{3,}/g, "\\n\\n").trim();
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function looksLikeHeaderFooter(line) {
-  const hasPage = /\\/\\s*\\d+\\s*$/.test(line) || /\\b\\d+\\s*\\/\\s*\\d+\\b/.test(line);
-  const hasMsds = /MSDS/i.test(line) || /(M\\s*S\\s*D\\s*S)/i.test(line);
-  const tokens = line.split(/\\s+/).filter(Boolean);
+  const hasPage = /\/\s*\d+\s*$/.test(line) || /\b\d+\s*\/\s*\d+\b/.test(line);
+  const hasMsds = /MSDS/i.test(line) || /(M\s*S\s*D\s*S)/i.test(line);
+  const tokens = line.split(/\s+/).filter(Boolean);
   if (!tokens.length) return false;
   const singleLetters = tokens.filter((t) => /^[A-Za-z]$/.test(t)).length;
   const ratio = singleLetters / tokens.length;
@@ -1376,13 +1342,13 @@ function looksLikeHeaderFooter(line) {
 
 function finalizeForDisplay(t) {
   let s = String(t || "");
-  s = s.replace(/\\r\\n?/g, "\\n");
-  s = s.replace(/[ \\t]+/g, " ");
-  s = s.replace(/([A-Za-z])-\\n([A-Za-z])/g, "$1$2");
-  s = s.replace(/\\s*:\\s*/g, ": ");
-  s = s.replace(/\\s*;\\s*/g, "; ");
-  s = s.replace(/\\s*,\\s*/g, ", ");
-  s = s.replace(/\\n{3,}/g, "\\n\\n").trim();
+  s = s.replace(/\r\n?/g, "\n");
+  s = s.replace(/[ \t]+/g, " ");
+  s = s.replace(/([A-Za-z])-\n([A-Za-z])/g, "$1$2");
+  s = s.replace(/\s*:\s*/g, ": ");
+  s = s.replace(/\s*;\s*/g, "; ");
+  s = s.replace(/\s*,\s*/g, ", ");
+  s = s.replace(/\n{3,}/g, "\n\n").trim();
   return s;
 }
 
@@ -1399,17 +1365,17 @@ async function googleCse(env, query, opts) {
   const { fileTypePdf, num } = opts || {};
   const base =
     "https://www.googleapis.com/customsearch/v1" +
-    \`?key=\${encodeURIComponent(env.GOOGLE_API_KEY)}\` +
-    \`&cx=\${encodeURIComponent(env.GOOGLE_CX)}\` +
-    \`&q=\${encodeURIComponent(query)}\` +
-    \`&num=\${encodeURIComponent(String(Math.min(Math.max(num || 5, 1), 10)))}\` +
-    \`&safe=off\`;
+    `?key=${encodeURIComponent(env.GOOGLE_API_KEY)}` +
+    `&cx=${encodeURIComponent(env.GOOGLE_CX)}` +
+    `&q=${encodeURIComponent(query)}` +
+    `&num=${encodeURIComponent(String(Math.min(Math.max(num || 5, 1), 10)))}` +
+    `&safe=off`;
 
-  const url = fileTypePdf ? (base + \`&fileType=pdf\`) : base;
+  const url = fileTypePdf ? (base + `&fileType=pdf`) : base;
   const resp = await fetch(url);
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    throw new Error(data?.error?.message || \`Google API hata: \${resp.status}\`);
+    throw new Error(data?.error?.message || `Google API hata: ${resp.status}`);
   }
   return data.items || [];
 }
@@ -1417,7 +1383,7 @@ async function googleCse(env, query, opts) {
 function extractMilPrfFromSearchResults(items) {
   const found = new Set();
   for (const it of items || []) {
-    const t = \`\${it.title || ""} \${it.snippet || ""}\`.toUpperCase();
+    const t = `${it.title || ""} ${it.snippet || ""}`.toUpperCase();
     for (const code of extractMilPrfCodes(t)) found.add(code);
   }
   return Array.from(found);
@@ -1441,10 +1407,10 @@ async function extractMilPrfByFetchingPages(links) {
 
 function extractMilPrfCodes(upperText) {
   const out = new Set();
-  const re = /\\bMIL\\s*[- ]?\\s*PRF\\s*[- ]?\\s*([0-9]{3,6}[A-Z0-9/-]{0,12})\\b/g;
+  const re = /\bMIL\s*[- ]?\s*PRF\s*[- ]?\s*([0-9]{3,6}[A-Z0-9/-]{0,12})\b/g;
   let m;
   while ((m = re.exec(upperText)) !== null) {
-    const code = \`MIL-PRF-\${m[1]}\`.replace(/--+/g, "-");
+    const code = `MIL-PRF-${m[1]}`.replace(/--+/g, "-");
     out.add(code);
   }
   return Array.from(out);
@@ -1503,7 +1469,7 @@ async function assertSafeUrl(raw) {
   const host = u.hostname.toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost")) throw new Error("Güvenlik: localhost engellendi.");
 
-  if (/^\\d{1,3}(\\.\\d{1,3}){3}$/.test(host)) {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
     const [a, b] = host.split(".").map((n) => parseInt(n, 10));
     const isPrivate =
       a === 127 ||
